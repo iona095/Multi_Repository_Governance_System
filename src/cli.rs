@@ -11,6 +11,7 @@ pub struct Cli {
 pub enum CliCommand {
     Plan(PlanSub),
     Phase(PhaseSub),
+    Contract(ContractSub),
 }
 
 #[derive(clap::Args, Debug)]
@@ -42,5 +43,21 @@ pub enum PhaseAction {
         repo: String,
         #[arg(long)]
         phase: String,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ContractSub {
+    #[command(subcommand)]
+    pub action: ContractAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ContractAction {
+    Draft {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        contract: String,
     },
 }

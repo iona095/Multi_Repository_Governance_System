@@ -133,4 +133,46 @@ pub enum Error {
 
     #[error("unauthorized governance filename: {0}")]
     UnauthorizedFilename(String),
+
+    #[error("unsupported contract schema version: {0}")]
+    UnsupportedContractSchema(u32),
+
+    #[error("empty or whitespace-only field '{0}' in contract")]
+    EmptyContractField(String),
+
+    #[error("'{0}' list is empty in contract")]
+    EmptyContractList(String),
+
+    #[error("empty or whitespace-only entry in contract '{0}' list")]
+    EmptyContractListEntry(String),
+
+    #[error("duplicate entry in contract '{0}' list")]
+    DuplicateContractListEntry(String),
+
+    #[error("no active phase selected")]
+    NoActivePhase,
+
+    #[error("contract phase ID '{0}' does not match active phase '{1}'")]
+    ContractPhaseMismatch(String, String),
+
+    #[error("contract source file is inside .mrgs directory")]
+    ContractSourceInsideMrgs,
+
+    #[error("contract source file is outside repository")]
+    ContractSourceOutsideRepo,
+
+    #[error("contract draft already exists with different content")]
+    ContractDraftConflict,
+
+    #[error("unsupported contract draft schema version: {0}")]
+    UnsupportedDraftSchema(u32),
+
+    #[error("contract draft revision must be 1, got {0}")]
+    DraftRevisionNotOne(u32),
+
+    #[error("contract draft field mismatch: {0}")]
+    DraftFieldMismatch(String),
+
+    #[error("contract draft content hash mismatch")]
+    DraftContentHashMismatch,
 }

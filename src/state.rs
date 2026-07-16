@@ -15,6 +15,19 @@ pub struct AcceptedPlan {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractDraft {
+    pub schema_version: u32,
+    pub accepted_plan_sha256: String,
+    pub phase_id: String,
+    pub contract_id: String,
+    pub revision: u32,
+    pub source_path: String,
+    pub sha256: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GovernanceState {
     pub schema_version: u32,
     pub accepted_plan_sha256: String,
@@ -96,7 +109,7 @@ fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn validate_governance_filename(filename: &str) -> Result<(), crate::error::Error> {
     match filename {
-        "accepted-plan.json" | "state.json" => {}
+        "accepted-plan.json" | "state.json" | "contract-draft.json" => {}
         _ => {
             return Err(crate::error::Error::UnauthorizedFilename(
                 filename.to_string(),
@@ -316,6 +329,60 @@ pub fn validate_plan_consistency(
     Ok(())
 }
 
+pub fn validate_contract_draft_record(
+    draft: &ContractDraft,
+    accepted_sha: &str,
+    active_phase: &str,
+    contract_id: &str,
+) -> Result<(), crate::error::Error> {
+    if draft.schema_version != 1 {
+        return Err(crate::error::Error::UnsupportedDraftSchema(
+            draft.schema_version,
+        ));
+    }
+    if draft.revision != 1 {
+        return Err(crate::error::Error::DraftRevisionNotOne(draft.revision));
+    }
+    if !is_valid_sha64(&draft.sha256) {
+        return Err(crate::error::Error::InvalidSha256);
+    }
+    if !is_valid_sha64(&draft.accepted_plan_sha256) {
+        return Err(crate::error::Error::InvalidSha256);
+    }
+    if draft.accepted_plan_sha256 != accepted_sha {
+        return Err(crate::error::Error::DraftFieldMismatch(
+            "accepted_plan_sha256".into(),
+        ));
+    }
+    if draft.phase_id != active_phase {
+        return Err(crate::error::Error::DraftFieldMismatch("phase_id".into()));
+    }
+    if draft.contract_id != contract_id {
+        return Err(crate::error::Error::DraftFieldMismatch(
+            "contract_id".into(),
+        ));
+    }
+    crate::path::validate_strict_normalized_path(&draft.source_path)?;
+    let parsed: crate::contract::Contract = toml::from_str(&draft.content)?;
+    parsed.validate()?;
+    if draft.contract_id != parsed.contract_id {
+        return Err(crate::error::Error::DraftFieldMismatch(
+            "contract_id".into(),
+        ));
+    }
+    if draft.phase_id != parsed.phase_id {
+        return Err(crate::error::Error::DraftFieldMismatch("phase_id".into()));
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(draft.content.as_bytes());
+    let computed = format!("{:x}", hasher.finalize());
+    if computed != draft.sha256 {
+        return Err(crate::error::Error::DraftContentHashMismatch);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +424,7 @@ mod tests {
     fn test_validate_governance_filename_accepts_valid() {
         assert!(validate_governance_filename("accepted-plan.json").is_ok());
         assert!(validate_governance_filename("state.json").is_ok());
+        assert!(validate_governance_filename("contract-draft.json").is_ok());
     }
 
     #[test]

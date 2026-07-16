@@ -1,4 +1,5 @@
 mod cli;
+mod contract;
 mod error;
 mod path;
 mod plan;
@@ -17,6 +18,9 @@ fn main() {
         },
         cli::CliCommand::Phase(sub) => match sub.action {
             cli::PhaseAction::Select { repo, phase } => cmd_phase_select(&repo, &phase),
+        },
+        cli::CliCommand::Contract(sub) => match sub.action {
+            cli::ContractAction::Draft { repo, contract } => cmd_contract_draft(&repo, &contract),
         },
     };
 
@@ -184,4 +188,104 @@ fn cmd_phase_select(repo_arg: &str, phase_id: &str) -> Result<String, error::Err
     state::atomic_write_json(&gov_dir, "state.json", &gov_state)?;
 
     Ok(phase_id.to_string())
+}
+
+fn cmd_contract_draft(repo_arg: &str, contract_arg: &str) -> Result<String, error::Error> {
+    let repo_path = Path::new(repo_arg);
+    path::assert_existing_dir(repo_path)?;
+    let repo = std::fs::canonicalize(repo_path)?;
+
+    let gov_dir = path::validate_gov_dir_exists(&repo)?;
+
+    let accepted = state::read_accepted_plan(&repo)?;
+    let gov_state = state::read_state(&repo)?;
+
+    let plan_file = path::resolve_safe_plan_path(&repo, &accepted.plan_path)?;
+    let plan_bytes = std::fs::read(&plan_file)?;
+    let plan_sha256 = {
+        let mut hasher = Sha256::new();
+        hasher.update(&plan_bytes);
+        format!("{:x}", hasher.finalize())
+    };
+    let plan_str = String::from_utf8(plan_bytes)?;
+    let parsed_plan: plan::Plan = toml::from_str(&plan_str)?;
+
+    state::validate_accepted_plan_record(&accepted)?;
+    state::validate_state_record(&gov_state, &accepted, &parsed_plan)?;
+    state::validate_plan_consistency(&accepted, &parsed_plan, &plan_sha256)?;
+    parsed_plan.validate()?;
+
+    let active_phase = gov_state.active_phase.ok_or(error::Error::NoActivePhase)?;
+
+    let contract_path = Path::new(contract_arg);
+    path::assert_existing_file(contract_path)?;
+    let contract_src = std::fs::canonicalize(contract_path)?;
+
+    if !path::plan_is_inside_repo(&contract_src, &repo) {
+        return Err(error::Error::ContractSourceOutsideRepo);
+    }
+    if contract_src.starts_with(&gov_dir) {
+        return Err(error::Error::ContractSourceInsideMrgs);
+    }
+
+    let source_bytes = std::fs::read(&contract_src)?;
+    let source_str = String::from_utf8(source_bytes.clone())?;
+
+    let contract: contract::Contract = toml::from_str(&source_str)?;
+    contract.validate()?;
+
+    if contract.phase_id != active_phase {
+        return Err(error::Error::ContractPhaseMismatch(
+            contract.phase_id,
+            active_phase,
+        ));
+    }
+
+    let source_sha256 = {
+        let mut hasher = Sha256::new();
+        hasher.update(&source_bytes);
+        format!("{:x}", hasher.finalize())
+    };
+
+    let relative_path = path::relative_plan_path(&contract_src, &repo);
+    let source_path = relative_path
+        .to_str()
+        .ok_or_else(|| error::Error::UnsafePlanPath("<non-utf8-path>".to_string()))?
+        .replace('\\', "/");
+    path::validate_strict_normalized_path(&source_path)?;
+
+    let draft_path = gov_dir.join("contract-draft.json");
+    if draft_path.exists() {
+        let existing_draft: state::ContractDraft =
+            serde_json::from_slice(&std::fs::read(&draft_path)?)?;
+        state::validate_contract_draft_record(
+            &existing_draft,
+            &accepted.sha256,
+            &active_phase,
+            &contract.contract_id,
+        )?;
+        if existing_draft.sha256 == source_sha256 {
+            return Ok(format!(
+                "{} {}",
+                existing_draft.contract_id, existing_draft.sha256
+            ));
+        } else {
+            return Err(error::Error::ContractDraftConflict);
+        }
+    }
+
+    let draft = state::ContractDraft {
+        schema_version: 1,
+        accepted_plan_sha256: accepted.sha256.clone(),
+        phase_id: active_phase.clone(),
+        contract_id: contract.contract_id.clone(),
+        revision: 1,
+        source_path,
+        sha256: source_sha256.clone(),
+        content: source_str,
+    };
+
+    state::atomic_write_json(&gov_dir, "contract-draft.json", &draft)?;
+
+    Ok(format!("{} {}", contract.contract_id, source_sha256))
 }

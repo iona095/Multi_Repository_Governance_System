@@ -117,6 +117,29 @@ pub fn validate_safe_relative_path(path_str: &str) -> Result<PathBuf, crate::err
     Ok(path.to_path_buf())
 }
 
+pub fn validate_strict_normalized_path(path_str: &str) -> Result<(), crate::error::Error> {
+    if path_str.is_empty() {
+        return Err(crate::error::Error::EmptyPlanPath);
+    }
+    if path_str.contains('\\') {
+        return Err(crate::error::Error::UnsafePlanPath(path_str.to_string()));
+    }
+    if path_str.starts_with('/') {
+        return Err(crate::error::Error::UnsafePlanPath(path_str.to_string()));
+    }
+    if path_str.ends_with('/') {
+        return Err(crate::error::Error::UnsafePlanPath(path_str.to_string()));
+    }
+    if path_str.contains("//") {
+        return Err(crate::error::Error::UnsafePlanPath(path_str.to_string()));
+    }
+    if path_str == ".mrgs" || path_str.starts_with(".mrgs/") {
+        return Err(crate::error::Error::UnsafePlanPath(path_str.to_string()));
+    }
+    validate_safe_relative_path(path_str)?;
+    Ok(())
+}
+
 pub fn resolve_safe_plan_path(
     repo: &Path,
     plan_path_str: &str,
