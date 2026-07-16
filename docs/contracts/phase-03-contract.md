@@ -1,9 +1,11 @@
 # Phase 3 Contract — Contract Acceptance, Revision, and Lifecycle Transitions
 
-Contract version: 1
+Contract version: 2
 Project: Multi-Repository Governance System
 Implementation language: Rust
 Binary name: `mrgs`
+
+Revision note: Version 2 resolves the revision-replay preimage contradiction by adding a strict immediately preceding draft receipt. It also makes replay output lifecycle-aware and makes draft idempotency explicitly depend on exact-byte equality. All non-superseded Phase 3 requirements remain controlling.
 
 ## 1. Objective
 
@@ -24,7 +26,7 @@ Phase 3 does not implement phase closeout, implementation execution, implementat
 The contract lifecycle has exactly three valid states:
 
 - `DRAFT`: a valid `contract-draft.json` exists and no accepted-contract ledger exists;
-- `ACCEPTED`: the final accepted revision exactly equals the current draft revision and exact content;
+- `ACCEPTED`: the final accepted revision exactly equals the current draft revision, source path, SHA, and content;
 - `REVISION_DRAFT`: an accepted revision exists, but the current draft has a greater revision.
 
 The lifecycle state is inferred from validated files. It is not stored in `state.json`.
@@ -67,7 +69,7 @@ The existing file remains:
 <repo>/.mrgs/contract-draft.json
 ```
 
-Its schema remains:
+The deterministic outer object remains strict and rejects unknown fields. A revision-1 draft remains compatible with the Phase 2 record and has exactly this shape, with no `preimage` field:
 
 ```json
 {
@@ -82,7 +84,28 @@ Its schema remains:
 }
 ```
 
-Phase 3 intentionally supersedes the Phase 2 restriction that every persisted draft must have `revision == 1`.
+A draft with revision greater than `1` has the `preimage` field immediately after `revision` and before `source_path` in the deterministic record:
+
+```json
+{
+  "schema_version": 1,
+  "accepted_plan_sha256": "lowercase-hex",
+  "phase_id": "phase-3",
+  "contract_id": "phase-3-contract-v1",
+  "revision": 2,
+  "preimage": {
+    "revision": 1,
+    "sha256": "lowercase-hex"
+  },
+  "source_path": "docs/contracts/runtime-phase-3-v2.toml",
+  "sha256": "lowercase-hex",
+  "content": "exact UTF-8 source content"
+}
+```
+
+`preimage` is the sole optional outer field, with presence determined strictly by draft revision. The nested `preimage` object is strict and contains exactly `revision` and `sha256`; unknown fields are rejected. The receipt is replay-verification evidence only. It is not accepted authority, is not lifecycle state, is not copied into `accepted-contract.json`, and contains no timestamp, username, hostname, model name, source content, path, or nondeterministic metadata.
+
+Phase 3 intentionally supersedes the Phase 2 restriction that every persisted draft must have `revision == 1`. Version 2 further supersedes the version 1 draft shape for revisions greater than `1` by requiring the preimage receipt while retaining exact compatibility for valid revision-1 Phase 2 drafts.
 
 After Phase 3:
 
@@ -90,9 +113,17 @@ After Phase 3:
 - every persisted draft revision must be at least `1`;
 - only `contract revise` may create revision `2` or greater;
 - revisions increase by exactly one from the current draft preimage;
-- revision `0` is always invalid.
+- revision `0` is always invalid;
+- revision `1` requires `preimage` to be absent;
+- revision greater than `1` requires `preimage` to be present;
+- `preimage.revision` must be positive and equal `revision - 1`;
+- `preimage.sha256` must be lowercase 64-character hexadecimal;
+- JSON `null` is not equivalent to an absent `preimage` field;
+- malformed or inconsistent preimage authority is rejected without repair.
 
-`contract draft` must remain exact-byte idempotent for the current valid draft, including a current draft with revision greater than `1`. Different bytes remain rejected and must use `contract revise`.
+An existing valid revision-1 Phase 2 draft without `preimage` remains valid. A revision-1 draft with `preimage`, or a revision-greater-than-1 draft without `preimage`, is invalid.
+
+`contract draft` must remain exact-byte idempotent for the current valid draft, including a current draft with revision greater than `1`. Idempotent success requires complete lifecycle validation, submitted source SHA equality, submitted exact source-byte equality with `draft.content.as_bytes()`, submitted phase equality with the active phase, submitted contract-ID equality with the current draft, and a normalized submitted source path satisfying the existing Phase 2 idempotency rules. Recorded SHA equality alone never authorizes success. Different exact bytes must be rejected even if corrupted or synthetic comparison data presents the same digest, and must use `contract revise`.
 
 The Phase 2 test that treated every revision other than `1` as malformed must be updated because that behavior is intentionally superseded. Equivalent or stronger corruption coverage must remain for revision `0`, invalid lifecycle relations, and unauthorized revision transitions.
 
@@ -124,6 +155,8 @@ It is deterministic, strict JSON with this structure:
 ```
 
 Both the ledger and each revision entry must reject unknown JSON fields.
+
+The accepted-contract schema is unchanged by contract version 2. Accepted revision entries never contain `preimage`. Acceptance copies only the draft revision's `revision`, `source_path`, `sha256`, and `content` fields.
 
 The ledger must contain no timestamps, hostnames, usernames, absolute paths, model names, decision-maker names, signatures, random identifiers, or nondeterministic metadata.
 
@@ -172,7 +205,7 @@ Before `contract draft`, `contract accept`, or `contract revise` makes a governa
 8. validate accepted-plan, state, and plan consistency;
 9. require a valid active phase;
 10. detect incomplete contract authority;
-11. strictly validate every existing contract authority record;
+11. strictly validate every existing contract authority record, including the outer draft object and any required nested preimage receipt;
 12. infer a valid lifecycle state.
 
 Incomplete authority includes:
@@ -219,6 +252,7 @@ A stale revision or stale SHA must fail even if it identifies a previously accep
 When no accepted ledger exists:
 
 - create a strict ledger containing exactly one revision copied from the current draft;
+- copy only `revision`, `source_path`, `sha256`, and `content`; do not copy `preimage`;
 - write only `accepted-contract.json`;
 - preserve every existing governance file byte-for-byte;
 - print:
@@ -232,11 +266,14 @@ ACCEPTED <contract_id> <revision> <sha256>
 When a valid accepted ledger exists and its final revision is lower than the current draft revision:
 
 - append exactly one new accepted revision copied from the current draft;
+- copy only `revision`, `source_path`, `sha256`, and `content`; do not copy `preimage`;
 - preserve every earlier accepted entry byte-for-byte in value and order;
 - write only `accepted-contract.json`;
 - print the same deterministic success format.
 
 The accepted ledger is append-only through valid commands. An earlier entry is never removed, edited, reordered, or replaced.
+
+Acceptance does not delete or alter the current draft preimage receipt. The receipt remains available so a later replay of the revision command can validate the exact preimage and return the lifecycle currently implied by accepted authority.
 
 ### 8.3 Idempotent acceptance
 
@@ -274,7 +311,7 @@ Revision must:
 11. require the new contract phase to equal the active phase;
 12. require the new contract ID to exactly equal the current draft contract ID;
 13. reject a new contract with exact bytes equal to the current draft;
-14. reject revision overflow;
+14. reject revision overflow before addition;
 15. leave the accepted ledger unchanged.
 
 ### 9.1 Compare-and-swap transition
@@ -286,26 +323,37 @@ expected-revision == current draft revision
 expected-sha256 == current draft sha256
 ```
 
+Both supplied values must be validated exactly before any write.
+
 The new draft must have:
 
 ```text
-revision = expected-revision + 1
+revision = current draft revision + 1
+preimage.revision = validated expected-revision
+preimage.sha256 = validated expected-sha256
 ```
 
-All other draft fields are deterministically derived from validated current authority and exact new source bytes.
+The receipt records the exact immediately preceding draft tuple. A later normal revision replaces the receipt with that transition's newly validated immediately preceding tuple. All other draft fields are deterministically derived from validated current authority and exact new source bytes.
 
 The operation writes only `contract-draft.json`.
 
 ### 9.2 Idempotent revision replay
 
-A repeated invocation after a successful revision is idempotent only when all are true:
+A repeated invocation after a successful revision is idempotent only when complete current authority has been validated and all are true:
 
 ```text
 current draft revision == expected-revision + 1
+current draft preimage exists
+current draft preimage revision == expected-revision
+current draft preimage sha256 == expected-sha256
+expected-sha256 is valid lowercase 64-character hexadecimal
 current draft sha256 == newly submitted exact source sha256
 current draft content bytes == newly submitted exact source bytes
 current draft phase and contract ID equal the submitted contract
+normalized submitted source_path == current draft source_path
 ```
+
+The `expected-revision + 1` comparison uses checked arithmetic; overflow is rejected rather than wrapped or normalized.
 
 In that case:
 
@@ -315,6 +363,8 @@ In that case:
 - report the lifecycle implied by the accepted ledger.
 
 Every other stale preimage is rejected.
+
+Rejection explicitly includes an arbitrary valid lowercase SHA, an SHA from an older accepted revision, an SHA from an older unaccepted revision, an expected revision older by more than one, a correct expected revision with the wrong SHA, a correct SHA with the wrong expected revision, the same submitted bytes from a different normalized source path, an absent or malformed current preimage receipt, malformed accepted authority, a changed phase, a changed contract ID, or different new-source bytes.
 
 ### 9.3 Revision output
 
@@ -330,6 +380,26 @@ When an accepted ledger exists and its final revision is lower than the new draf
 REVISION_DRAFT <contract_id> <revision> <sha256>
 ```
 
+Revision replay reports the lifecycle inferred from completely validated current authority. Its exact output is:
+
+```text
+DRAFT <contract_id> <revision> <sha256>
+```
+
+when no accepted ledger exists;
+
+```text
+REVISION_DRAFT <contract_id> <revision> <sha256>
+```
+
+when the final accepted revision is lower than the current draft; and
+
+```text
+ACCEPTED <contract_id> <revision> <sha256>
+```
+
+when the final accepted revision exactly equals the current draft in revision, source path, SHA, and content. Replay after the revised draft has subsequently been accepted therefore returns `ACCEPTED`, not `REVISION_DRAFT`. A normal revision from an accepted current draft still creates a newer pending draft and returns `REVISION_DRAFT`.
+
 ## 10. Lifecycle transition table
 
 Only these transitions are legal:
@@ -344,6 +414,7 @@ REVISION_DRAFT -> ACCEPTED by exact acceptance
 ACCEPTED -> ACCEPTED by idempotent acceptance
 DRAFT -> DRAFT by idempotent draft or revision replay
 REVISION_DRAFT -> REVISION_DRAFT by idempotent revision replay
+ACCEPTED -> ACCEPTED by idempotent revision replay
 ```
 
 Forbidden transitions include:
@@ -376,6 +447,8 @@ Forbidden transitions include:
 - Acceptance never writes the draft or state.
 - Revision never writes the accepted ledger or state.
 - Initial draft never creates accepted authority.
+- The preimage receipt is stored only inside `contract-draft.json`; no new governance file is introduced.
+- Acceptance preserves the current draft, including any preimage receipt, byte-for-byte.
 - No contract operation changes `active_phase` or `closed_phases`.
 
 ## 12. Path safety
@@ -501,7 +574,35 @@ Meaningfully cover at least:
 72. `contract draft` validates existing lifecycle authority;
 73. initial draft creates no accepted ledger;
 74. all non-superseded Phase 1 and Phase 2 tests continue to pass;
-75. the superseded revision-equals-one test is replaced by stronger revision-zero and lifecycle-consistency tests.
+75. the superseded revision-equals-one test is replaced by stronger revision-zero, preimage-receipt, and lifecycle-consistency tests;
+76. revision-1 draft without preimage is valid;
+77. revision-1 draft with preimage is rejected;
+78. revision-greater-than-1 draft without preimage is rejected;
+79. revision-greater-than-1 draft with a valid immediate preimage is valid;
+80. preimage revision zero rejection;
+81. preimage revision mismatch rejection;
+82. malformed preimage SHA rejection;
+83. uppercase preimage SHA rejection;
+84. unknown preimage JSON field rejection;
+85. null preimage rejection where absence is required or a valid object is required;
+86. normal revision stores the exact validated preimage tuple;
+87. chained revisions replace the receipt with the immediately preceding tuple;
+88. replay with the exact stored preimage succeeds;
+89. replay with an arbitrary valid wrong SHA fails;
+90. replay with an older accepted revision SHA fails;
+91. replay with the correct revision and wrong SHA fails;
+92. replay with the correct SHA and wrong revision fails;
+93. replay older by more than one revision fails;
+94. replay with the same content from a different normalized source path fails;
+95. replay after acceptance returns `ACCEPTED`;
+96. replay before first acceptance returns `DRAFT`;
+97. replay with an older accepted ledger returns `REVISION_DRAFT`;
+98. malformed receipt preserves every governance file byte-for-byte;
+99. accepted ledger entries contain no preimage field;
+100. acceptance preserves the draft preimage receipt byte-for-byte;
+101. contract draft proves exact submitted-byte equality in addition to digest equality;
+102. an implementation-level comparator regression constructs unequal byte content while presenting equal digest metadata and proves digest equality alone cannot authorize idempotency, without requiring a real SHA-256 collision;
+103. all non-superseded Phase 1, Phase 2, and Phase 3 tests continue to pass.
 
 Tests must inspect actual bytes and JSON fields, not only exit status.
 
