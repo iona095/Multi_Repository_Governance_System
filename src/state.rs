@@ -16,11 +16,82 @@ pub struct AcceptedPlan {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ContractDraftPreimage {
+    pub revision: u32,
+    #[serde(deserialize_with = "deserialize_lowercase_sha")]
+    pub sha256: String,
+}
+
+fn deserialize_lowercase_sha<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let s = String::deserialize(deserializer)?;
+    if !is_valid_sha64(&s) {
+        return Err(serde::de::Error::custom(
+            "sha256 must be lowercase 64-character hex",
+        ));
+    }
+    Ok(s)
+}
+
+fn deserialize_preimage<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ContractDraftPreimage>, D::Error> {
+    use serde::de::Visitor;
+    struct PreimageVisitor;
+    impl<'de> Visitor<'de> for PreimageVisitor {
+        type Value = Option<ContractDraftPreimage>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a preimage object or absent")
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Err(serde::de::Error::custom("null is not allowed for preimage"))
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Err(serde::de::Error::custom("null is not allowed for preimage"))
+        }
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            ContractDraftPreimage::deserialize(deserializer).map(Some)
+        }
+    }
+    deserializer.deserialize_option(PreimageVisitor)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContractDraft {
     pub schema_version: u32,
     pub accepted_plan_sha256: String,
     pub phase_id: String,
     pub contract_id: String,
+    pub revision: u32,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_preimage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub preimage: Option<ContractDraftPreimage>,
+    pub source_path: String,
+    pub sha256: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedContractLedger {
+    pub schema_version: u32,
+    pub accepted_plan_sha256: String,
+    pub phase_id: String,
+    pub contract_id: String,
+    pub revisions: Vec<AcceptedRevision>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedRevision {
     pub revision: u32,
     pub source_path: String,
     pub sha256: String,
@@ -109,7 +180,7 @@ fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn validate_governance_filename(filename: &str) -> Result<(), crate::error::Error> {
     match filename {
-        "accepted-plan.json" | "state.json" | "contract-draft.json" => {}
+        "accepted-plan.json" | "state.json" | "contract-draft.json" | "accepted-contract.json" => {}
         _ => {
             return Err(crate::error::Error::UnauthorizedFilename(
                 filename.to_string(),
@@ -340,8 +411,8 @@ pub fn validate_contract_draft_record(
             draft.schema_version,
         ));
     }
-    if draft.revision != 1 {
-        return Err(crate::error::Error::DraftRevisionNotOne(draft.revision));
+    if draft.revision < 1 {
+        return Err(crate::error::Error::DraftRevisionZero);
     }
     if !is_valid_sha64(&draft.sha256) {
         return Err(crate::error::Error::InvalidSha256);
@@ -362,6 +433,42 @@ pub fn validate_contract_draft_record(
             "contract_id".into(),
         ));
     }
+    // Preimage validation
+    match &draft.preimage {
+        Some(pre) => {
+            if draft.revision == 1 {
+                return Err(crate::error::Error::DraftPreimageUnexpected);
+            }
+            if pre.revision < 1 {
+                return Err(crate::error::Error::DraftPreimageRevisionZero);
+            }
+            let expected = draft.revision.checked_sub(1).ok_or_else(|| {
+                let zero: u32 = 0;
+                crate::error::Error::DraftPreimageRevisionMismatch {
+                    preimage_revision: pre.revision,
+                    draft_revision: draft.revision,
+                    expected: zero,
+                }
+            })?;
+            if pre.revision != expected {
+                return Err(crate::error::Error::DraftPreimageRevisionMismatch {
+                    preimage_revision: pre.revision,
+                    draft_revision: draft.revision,
+                    expected,
+                });
+            }
+            if !is_valid_sha64(&pre.sha256) {
+                return Err(crate::error::Error::DraftPreimageShaInvalid);
+            }
+        }
+        None => {
+            if draft.revision > 1 {
+                return Err(crate::error::Error::DraftPreimageRequired {
+                    draft_revision: draft.revision,
+                });
+            }
+        }
+    }
     crate::path::validate_strict_normalized_path(&draft.source_path)?;
     let parsed: crate::contract::Contract = toml::from_str(&draft.content)?;
     parsed.validate()?;
@@ -379,6 +486,137 @@ pub fn validate_contract_draft_record(
     let computed = format!("{:x}", hasher.finalize());
     if computed != draft.sha256 {
         return Err(crate::error::Error::DraftContentHashMismatch);
+    }
+    Ok(())
+}
+
+pub fn is_draft_idempotent(
+    existing_sha: &str,
+    existing_content: &str,
+    submitted_sha: &str,
+    submitted_bytes: &[u8],
+) -> bool {
+    existing_sha == submitted_sha && existing_content.as_bytes() == submitted_bytes
+}
+
+pub fn read_contract_draft(gov_dir: &Path) -> Result<ContractDraft, crate::error::Error> {
+    let path = gov_dir.join("contract-draft.json");
+    Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+}
+
+pub fn read_accepted_contract_ledger(
+    gov_dir: &Path,
+) -> Result<AcceptedContractLedger, crate::error::Error> {
+    let path = gov_dir.join("accepted-contract.json");
+    Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+}
+
+pub fn validate_accepted_contract_ledger(
+    ledger: &AcceptedContractLedger,
+    accepted_plan_sha: &str,
+    active_phase: &str,
+    draft: Option<&ContractDraft>,
+) -> Result<(), crate::error::Error> {
+    if ledger.schema_version != 1 {
+        return Err(crate::error::Error::AcceptedSchemaVersion(
+            ledger.schema_version,
+        ));
+    }
+    if !is_valid_sha64(&ledger.accepted_plan_sha256) {
+        return Err(crate::error::Error::InvalidSha256);
+    }
+    if ledger.accepted_plan_sha256 != accepted_plan_sha {
+        return Err(crate::error::Error::AcceptedContractPlanShaMismatch);
+    }
+    if ledger.phase_id.is_empty() {
+        return Err(crate::error::Error::EmptyContractField("phase_id".into()));
+    }
+    if ledger.phase_id != active_phase {
+        return Err(crate::error::Error::AcceptedContractPhaseMismatch {
+            expected: active_phase.to_string(),
+            actual: ledger.phase_id.clone(),
+        });
+    }
+    if ledger.contract_id.is_empty() {
+        return Err(crate::error::Error::EmptyContractField(
+            "contract_id".into(),
+        ));
+    }
+    if ledger.revisions.is_empty() {
+        return Err(crate::error::Error::AcceptedContractEmptyRevisions);
+    }
+    let mut prev_revision: Option<u32> = None;
+    let mut seen_revisions = std::collections::HashSet::new();
+    for rev in &ledger.revisions {
+        if rev.revision < 1 {
+            return Err(crate::error::Error::AcceptedContractRevisionZero);
+        }
+        if let Some(prev) = prev_revision {
+            if rev.revision <= prev {
+                return Err(crate::error::Error::AcceptedContractNonIncreasingRevision(
+                    rev.revision,
+                    prev,
+                ));
+            }
+        }
+        if !seen_revisions.insert(rev.revision) {
+            return Err(crate::error::Error::AcceptedContractDuplicateRevision(
+                rev.revision,
+            ));
+        }
+        prev_revision = Some(rev.revision);
+
+        crate::path::validate_strict_normalized_path(&rev.source_path)?;
+        if rev.source_path == ".mrgs" || rev.source_path.starts_with(".mrgs/") {
+            return Err(crate::error::Error::AcceptedContractSourceUnderMrgs);
+        }
+        if !is_valid_sha64(&rev.sha256) {
+            return Err(crate::error::Error::InvalidSha256);
+        }
+        let parsed: crate::contract::Contract = match toml::from_str(&rev.content) {
+            Ok(c) => c,
+            Err(_) => return Err(crate::error::Error::AcceptedContractContentParse),
+        };
+        parsed.validate()?;
+        if parsed.phase_id != ledger.phase_id {
+            return Err(crate::error::Error::AcceptedContractContentPhaseMismatch);
+        }
+        if parsed.contract_id != ledger.contract_id {
+            return Err(crate::error::Error::AcceptedContractContentIdMismatch);
+        }
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(rev.content.as_bytes());
+        let computed = format!("{:x}", hasher.finalize());
+        if computed != rev.sha256 {
+            return Err(crate::error::Error::AcceptedContractContentHashMismatch);
+        }
+    }
+    if let Some(draft) = draft {
+        if ledger.contract_id != draft.contract_id {
+            return Err(
+                crate::error::Error::AcceptedContractDraftContractIdMismatch {
+                    accepted: ledger.contract_id.clone(),
+                    draft: draft.contract_id.clone(),
+                },
+            );
+        }
+        let final_rev = ledger.revisions.last().unwrap();
+        if final_rev.revision > draft.revision {
+            return Err(
+                crate::error::Error::AcceptedContractFinalRevisionExceedsDraft {
+                    revision: final_rev.revision,
+                    draft_revision: draft.revision,
+                },
+            );
+        }
+        if final_rev.revision == draft.revision
+            && (final_rev.sha256 != draft.sha256
+                || final_rev.source_path != draft.source_path
+                || final_rev.content != draft.content)
+        {
+            return Err(crate::error::Error::AcceptedContractEqualRevisionContentMismatch);
+        }
     }
     Ok(())
 }
@@ -425,6 +663,7 @@ mod tests {
         assert!(validate_governance_filename("accepted-plan.json").is_ok());
         assert!(validate_governance_filename("state.json").is_ok());
         assert!(validate_governance_filename("contract-draft.json").is_ok());
+        assert!(validate_governance_filename("accepted-contract.json").is_ok());
     }
 
     #[test]
@@ -432,6 +671,34 @@ mod tests {
         assert!(validate_governance_filename("other.json").is_err());
         assert!(validate_governance_filename("accepted-plan.json/").is_err());
         assert!(validate_governance_filename("../state.json").is_err());
+    }
+
+    #[test]
+    fn test_is_draft_idempotent_requires_exact_bytes_beyond_digest() {
+        let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let existing_content = "content version a";
+        let submitted_bytes = b"content version b";
+        // Equal digest metadata but different byte content
+        assert!(!is_draft_idempotent(
+            digest,
+            existing_content,
+            digest,
+            submitted_bytes,
+        ));
+        // Equal digest AND equal bytes succeeds
+        assert!(is_draft_idempotent(
+            digest,
+            existing_content,
+            digest,
+            existing_content.as_bytes(),
+        ));
+    }
+
+    #[test]
+    fn test_is_draft_idempotent_rejects_sha_mismatch() {
+        let sha_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let sha_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(!is_draft_idempotent(sha_a, "content", sha_b, b"content",));
     }
 
     #[test]

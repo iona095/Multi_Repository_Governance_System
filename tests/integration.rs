@@ -1960,13 +1960,13 @@ fn test_draft_persisted_contract_id_mismatch() {
     assert_no_temp_files(&repo);
 }
 
-// 37. persisted draft revision other than 1
+// 37. persisted draft revision zero (supersedes Phase 2 revision-equals-one test)
 #[test]
-fn test_draft_persisted_revision_not_one() {
+fn test_draft_persisted_revision_zero_rejected() {
     let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
     assert_success(&run_contract_draft(&repo, &contract_path));
     let mut draft: serde_json::Value = read_json(&repo, "contract-draft.json");
-    draft["revision"] = serde_json::json!(2);
+    draft["revision"] = serde_json::json!(0);
     write_json(&repo, "contract-draft.json", &draft);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
@@ -1975,6 +1975,39 @@ fn test_draft_persisted_revision_not_one() {
         "stderr: {}",
         stderr_string(&output)
     );
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_draft_revision_two_valid_when_ledger_exists() {
+    let content = valid_contract_toml();
+    let content_v2 = valid_contract_toml().replace("Test objective", "Revised objective");
+    let (_dir, repo, contract_path) = setup_contract_test(content);
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    // Accept to create ledger
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let d_sha = draft["sha256"].as_str().unwrap().to_string();
+    let _d_contract_id = draft["contract_id"].as_str().unwrap().to_string();
+    let d_revision = draft["revision"].as_u64().unwrap() as u32;
+    let accept_out = run_contract_accept(&repo, d_revision, &d_sha, "ACCEPTED");
+    assert_success(&accept_out);
+    // Now write v2, revise to rev 2
+    write_plan(&contract_path, &content_v2);
+    let rev_out = run_contract_revise(&repo, &contract_path, 1, &d_sha);
+    assert_success(&rev_out);
+    // Verify draft revision is now 2
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft2["revision"].as_u64().unwrap(), 2);
+    // Verify contract draft still works idempotently with revision 2
+    let content_v2b = valid_contract_toml().replace("Test objective", "Revised objective");
+    write_plan(&contract_path, &content_v2b);
+    let draft2_sha = draft2["sha256"].as_str().unwrap().to_string();
+    let draft2_path = repo.join("contract_v2.toml");
+    write_plan(&draft2_path, &content_v2b);
+    let draft_out = run_contract_draft(&repo, &draft2_path);
+    assert_success(&draft_out);
+    let out_str = stdout_string(&draft_out);
+    assert!(out_str.contains(&draft2_sha), "stdout: {}", out_str);
     assert_no_temp_files(&repo);
 }
 
@@ -2384,4 +2417,2531 @@ fn test_draft_lf_crlf_bytes_differ() {
         LITERAL_SHA_DIGEST, CRLF_SHA_DIGEST,
         "LF and CRLF hashes must differ"
     );
+}
+
+// ===== Phase 3 — Contract Acceptance, Revision, and Lifecycle Transitions =====
+
+fn run_contract_accept(
+    repo: &Path,
+    revision: u32,
+    sha256: &str,
+    decision: &str,
+) -> std::process::Output {
+    let mut cmd = cargo_bin();
+    cmd.arg("contract")
+        .arg("accept")
+        .arg("--repo")
+        .arg(repo)
+        .arg("--revision")
+        .arg(revision.to_string())
+        .arg("--sha256")
+        .arg(sha256)
+        .arg("--decision")
+        .arg(decision);
+    cmd.output().unwrap()
+}
+
+fn run_contract_revise(
+    repo: &Path,
+    contract: &Path,
+    expected_revision: u32,
+    expected_sha256: &str,
+) -> std::process::Output {
+    let mut cmd = cargo_bin();
+    cmd.arg("contract")
+        .arg("revise")
+        .arg("--repo")
+        .arg(repo)
+        .arg("--contract")
+        .arg(contract)
+        .arg("--expected-revision")
+        .arg(expected_revision.to_string())
+        .arg("--expected-sha256")
+        .arg(expected_sha256);
+    cmd.output().unwrap()
+}
+
+fn setup_three_revision_contract() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+    String,
+    String,
+) {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    let v3_sha = contract_sha256(&v3);
+    write_plan(&contract_path, &v3);
+    assert_success(&run_contract_revise(&repo, &contract_path, 2, &v2_sha));
+
+    (_dir, repo, contract_path, sha1, v2_sha, v3_sha)
+}
+
+fn governance_bytes(repo: &Path) -> [Vec<u8>; 4] {
+    [
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
+    ]
+}
+
+fn assert_governance_bytes_unchanged(repo: &Path, before: &[Vec<u8>; 4]) {
+    assert_eq!(governance_bytes(repo), *before);
+    assert_no_temp_files(repo);
+}
+
+// 1. valid first acceptance
+#[test]
+fn test_accept_valid_first_acceptance() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let cid = draft["contract_id"].as_str().unwrap().to_string();
+    let output = run_contract_accept(&repo, rev, &sha, "ACCEPTED");
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(out.starts_with("ACCEPTED"), "stdout: {}", out);
+    assert!(out.contains(&cid), "stdout: {}", out);
+    assert!(out.contains(&rev.to_string()), "stdout: {}", out);
+    assert!(out.contains(&sha), "stdout: {}", out);
+    assert_no_temp_files(&repo);
+}
+
+// 2. exact ACCEPTED token
+#[test]
+fn test_accept_exact_accepted_token() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let output = run_contract_accept(&repo, rev, &sha, "ACCEPTED");
+    assert_success(&output);
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    assert_eq!(ledger["schema_version"].as_u64().unwrap(), 1);
+    let revs = ledger["revisions"].as_array().unwrap();
+    assert_eq!(revs.len(), 1);
+    assert_eq!(revs[0]["revision"].as_u64().unwrap() as u32, rev);
+    assert_no_temp_files(&repo);
+}
+
+// 3. lowercase token rejection
+#[test]
+fn test_accept_lowercase_token_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let output = run_contract_accept(&repo, rev, &sha, "accepted");
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("ACCEPTED"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert!(!repo.join(".mrgs").join("accepted-contract.json").exists());
+    assert_no_temp_files(&repo);
+}
+
+// 4. mixed-case token rejection
+#[test]
+fn test_accept_mixed_case_token_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let output = run_contract_accept(&repo, rev, &sha, "Accepted");
+    assert_failure(&output);
+    assert!(!repo.join(".mrgs").join("accepted-contract.json").exists());
+    assert_no_temp_files(&repo);
+}
+
+// 5. leading whitespace rejection
+#[test]
+fn test_accept_leading_whitespace_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let output = run_contract_accept(&repo, rev, &sha, " ACCEPTED");
+    assert_failure(&output);
+    assert!(!repo.join(".mrgs").join("accepted-contract.json").exists());
+    assert_no_temp_files(&repo);
+}
+
+// 6. trailing whitespace rejection
+#[test]
+fn test_accept_trailing_whitespace_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let output = run_contract_accept(&repo, rev, &sha, "ACCEPTED ");
+    assert_failure(&output);
+    assert!(!repo.join(".mrgs").join("accepted-contract.json").exists());
+    assert_no_temp_files(&repo);
+}
+
+// 7. wrong token rejection
+#[test]
+fn test_accept_wrong_token_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let output = run_contract_accept(&repo, rev, &sha, "ACCEPT");
+    assert_failure(&output);
+    assert!(!repo.join(".mrgs").join("accepted-contract.json").exists());
+    assert_no_temp_files(&repo);
+}
+
+// 8. stale revision rejection
+#[test]
+fn test_accept_stale_revision_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    // Accept revision 1
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    // Now revise to rev 2
+    let v2 = valid_contract_toml().replace("Test objective", "Revised objective");
+    let _v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha));
+    // Try to accept with stale revision 1
+    let output = run_contract_accept(&repo, 1, &sha, "ACCEPTED");
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("revision"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 9. stale SHA rejection
+#[test]
+fn test_accept_stale_sha_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let _sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
+    let output = run_contract_accept(&repo, rev, wrong_sha, "ACCEPTED");
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert!(!repo.join(".mrgs").join("accepted-contract.json").exists());
+    assert_no_temp_files(&repo);
+}
+
+// 10. uppercase SHA rejection
+#[test]
+fn test_accept_uppercase_sha_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let upper_sha = "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEF";
+    let output = run_contract_accept(&repo, rev, upper_sha, "ACCEPTED");
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 11. invalid SHA rejection
+#[test]
+fn test_accept_invalid_sha_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let output = run_contract_accept(&repo, rev, "not-a-sha", "ACCEPTED");
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 12. acceptance without draft
+#[test]
+fn test_accept_without_draft_rejected() {
+    let (_dir, repo, plan_path) = create_repo_and_plan(valid_plan_toml());
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let output = run_contract_accept(
+        &repo,
+        1,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "ACCEPTED",
+    );
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("draft"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 13. first acceptance exact ledger persistence
+#[test]
+fn test_accept_first_exact_ledger_persistence() {
+    let content = valid_contract_toml();
+    let expected_sha = contract_sha256(content);
+    let (_dir, repo, contract_path) = setup_contract_test(content);
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    assert_eq!(
+        ledger["accepted_plan_sha256"].as_str().map(|s| s.len()),
+        Some(64)
+    );
+    assert_eq!(ledger["phase_id"].as_str().unwrap(), "phase-1");
+    assert_eq!(ledger["contract_id"].as_str().unwrap(), "test-contract-v1");
+    let revs = ledger["revisions"].as_array().unwrap();
+    assert_eq!(revs.len(), 1);
+    assert_eq!(revs[0]["revision"].as_u64().unwrap(), 1);
+    assert_eq!(revs[0]["sha256"].as_str().unwrap(), expected_sha);
+    assert_eq!(revs[0]["source_path"].as_str().unwrap(), "contract.toml");
+    assert_eq!(
+        revs[0]["content"].as_str().unwrap().as_bytes(),
+        content.as_bytes()
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 14. accepted content exact-byte persistence
+#[test]
+fn test_accept_content_exact_bytes() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let stored_content = ledger["revisions"][0]["content"].as_str().unwrap();
+    let original_bytes = valid_contract_toml().as_bytes();
+    assert_eq!(
+        stored_content.as_bytes(),
+        original_bytes,
+        "accepted content must preserve exact bytes"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 15. literal SHA verification
+#[test]
+fn test_accept_literal_sha() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let contract_path = repo.join("contract.toml");
+    std::fs::write(&contract_path, LITERAL_SHA_CONTRACT).unwrap();
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    assert_success(&run_contract_accept(
+        &repo,
+        1,
+        LITERAL_SHA_DIGEST,
+        "ACCEPTED",
+    ));
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    assert_eq!(
+        ledger["revisions"][0]["sha256"].as_str().unwrap(),
+        LITERAL_SHA_DIGEST
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 16. accepted ledger unknown-field rejection
+#[test]
+fn test_accept_ledger_unknown_field_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["timestamp"] = serde_json::json!("now");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 17. accepted revision unknown-field rejection
+#[test]
+fn test_accept_revision_unknown_field_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["revisions"][0]["signature"] = serde_json::json!("sig");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 18. malformed accepted ledger rejection
+#[test]
+fn test_accept_malformed_ledger_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let ledger_path = repo.join(".mrgs").join("accepted-contract.json");
+    std::fs::write(&ledger_path, b"not-json").unwrap();
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_eq!(
+        std::fs::read(&ledger_path).unwrap(),
+        b"not-json",
+        "malformed ledger must not be repaired"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 19. empty revisions rejection
+#[test]
+fn test_accept_empty_revisions_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["revisions"] = serde_json::json!([]);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 20. accepted plan SHA mismatch
+#[test]
+fn test_accept_plan_sha_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["accepted_plan_sha256"] =
+        serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("plan SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 21. accepted phase mismatch
+#[test]
+fn test_accept_phase_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["phase_id"] = serde_json::json!("phase-2");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("phase"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 22. accepted contract ID mismatch
+#[test]
+fn test_accept_contract_id_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["contract_id"] = serde_json::json!("wrong-id");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("ID"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 23. accepted revision zero rejection
+#[test]
+fn test_accept_revision_zero_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["revisions"][0]["revision"] = serde_json::json!(0);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("revision"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 24. duplicate accepted revision rejection
+#[test]
+fn test_accept_duplicate_revision_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let rev1 = ledger["revisions"][0].clone();
+    ledger["revisions"].as_array_mut().unwrap().push(rev1);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 25. non-increasing revisions rejection
+#[test]
+fn test_accept_non_increasing_revisions_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let rev1 = ledger["revisions"][0].clone();
+    ledger["revisions"].as_array_mut().unwrap().push(rev1);
+    let revs = ledger["revisions"].as_array_mut().unwrap();
+    revs[1]["sha256"] =
+        serde_json::json!("1111111111111111111111111111111111111111111111111111111111111111");
+    revs[1]["content"] = serde_json::json!("schema_version = 1\ncontract_id = \"test-contract-v1\"\nphase_id = \"phase-1\"\ntitle = \"Test contract\"\nobjective = \"Modified.\"\n\nrequirements = [\"req1\"]\nallowed_paths = [\"src/\"]\nforbidden_paths = [\".git/\"]\nverification_commands = [\"cargo test\"]\nhandoff_fields = [\"FIELD1\"]\n");
+    let mod_sha = contract_sha256(revs[1]["content"].as_str().unwrap());
+    revs[1]["sha256"] = serde_json::json!(mod_sha);
+    revs[1]["revision"] = serde_json::json!(1);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("revision"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 26. accepted source path normalization rejection
+#[test]
+fn test_accept_source_path_backslash_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["revisions"][0]["source_path"] = serde_json::json!("docs\\contract.toml");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 27. accepted stored-content parse rejection
+#[test]
+fn test_accept_stored_content_parse_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["revisions"][0]["content"] = serde_json::json!("not valid toml");
+    ledger["revisions"][0]["sha256"] =
+        serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 28. accepted stored-content phase mismatch
+#[test]
+fn test_accept_stored_content_phase_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let bad_content =
+        valid_contract_toml().replace(r#"phase_id = "phase-1""#, r#"phase_id = "phase-2""#);
+    let bad_sha = contract_sha256(&bad_content);
+    ledger["revisions"][0]["content"] = serde_json::json!(bad_content);
+    ledger["revisions"][0]["sha256"] = serde_json::json!(bad_sha);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 29. accepted stored-content contract ID mismatch
+#[test]
+fn test_accept_stored_content_id_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let bad_content = valid_contract_toml().replace(
+        r#"contract_id = "test-contract-v1""#,
+        r#"contract_id = "wrong-id""#,
+    );
+    let bad_sha = contract_sha256(&bad_content);
+    ledger["revisions"][0]["content"] = serde_json::json!(bad_content);
+    ledger["revisions"][0]["sha256"] = serde_json::json!(bad_sha);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 30. accepted stored-content hash mismatch
+#[test]
+fn test_accept_stored_content_hash_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["revisions"][0]["sha256"] =
+        serde_json::json!("1111111111111111111111111111111111111111111111111111111111111111");
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 31. accepted final revision > draft rejection
+#[test]
+fn test_accept_final_revision_exceeds_draft() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    // Stash draft, set revision to 1 in ledger but revision 2
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["revisions"][0]["revision"] = serde_json::json!(2);
+    // Need to make content match, so add a tracked revision 2 content
+    let v2_content = valid_contract_toml().replace("Test objective", "Rev2 objective");
+    let v2_sha = contract_sha256(&v2_content);
+    ledger["revisions"][0]["content"] = serde_json::json!(v2_content);
+    ledger["revisions"][0]["sha256"] = serde_json::json!(v2_sha);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 32. equal revision with different content rejection
+#[test]
+fn test_accept_equal_revision_diff_content() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    // Change draft content but keep revision 1
+    let v2 = valid_contract_toml().replace("Test objective", "Different objective");
+    write_plan(&contract_path, &v2);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 33. valid idempotent acceptance
+#[test]
+fn test_accept_idempotent() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    let first = run_contract_accept(&repo, rev, &sha, "ACCEPTED");
+    assert_success(&first);
+    let second = run_contract_accept(&repo, rev, &sha, "ACCEPTED");
+    assert_success(&second);
+    assert_eq!(stdout_string(&first), stdout_string(&second));
+    assert_no_temp_files(&repo);
+}
+
+// 34. idempotent acceptance preserves every governance file
+#[test]
+fn test_accept_idempotent_preserves_files() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let accepted_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
+        accepted_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        plan_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        draft_before
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 35. valid acceptance append after revision
+#[test]
+fn test_accept_append_after_revision() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    // Revise to v2
+    let v2 = valid_contract_toml().replace("Test objective", "Rev2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let rev2 = draft2["revision"].as_u64().unwrap() as u32;
+    assert_eq!(rev2, 2);
+    let sha2 = draft2["sha256"].as_str().unwrap().to_string();
+    // Accept revision 2
+    let output = run_contract_accept(&repo, 2, &sha2, "ACCEPTED");
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(out.starts_with("ACCEPTED"), "stdout: {}", out);
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let revs = ledger["revisions"].as_array().unwrap();
+    assert_eq!(revs.len(), 2);
+    assert_eq!(revs[0]["revision"].as_u64().unwrap(), 1);
+    assert_eq!(revs[0]["sha256"].as_str().unwrap(), sha1);
+    assert_eq!(revs[1]["revision"].as_u64().unwrap(), 2);
+    assert_eq!(revs[1]["sha256"].as_str().unwrap(), v2_sha);
+    assert_no_temp_files(&repo);
+}
+
+// 36. append preserves earlier entries and order
+#[test]
+fn test_accept_append_preserves_order() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    // v2
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let v2_sha = contract_sha256(&v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    // Accept v2
+    assert_success(&run_contract_accept(&repo, 2, &v2_sha, "ACCEPTED"));
+    // v3
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    write_plan(&contract_path, &v3);
+    let v3_sha = contract_sha256(&v3);
+    assert_success(&run_contract_revise(&repo, &contract_path, 2, &v2_sha));
+    // Accept v3
+    assert_success(&run_contract_accept(&repo, 3, &v3_sha, "ACCEPTED"));
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let revs = ledger["revisions"].as_array().unwrap();
+    assert_eq!(revs.len(), 3);
+    assert_eq!(revs[0]["revision"].as_u64().unwrap(), 1);
+    assert_eq!(revs[1]["revision"].as_u64().unwrap(), 2);
+    assert_eq!(revs[2]["revision"].as_u64().unwrap(), 3);
+    assert_eq!(revs[0]["sha256"].as_str().unwrap(), sha1);
+    assert_eq!(revs[1]["sha256"].as_str().unwrap(), v2_sha);
+    assert_eq!(revs[2]["sha256"].as_str().unwrap(), v3_sha);
+    assert_no_temp_files(&repo);
+}
+
+// 37. accepted ledger remains append-only
+#[test]
+fn test_accept_append_only() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    // Save ledger bytes
+    let _ledger_bytes_before =
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    // Revise and accept v2
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let v2_sha = contract_sha256(&v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    assert_success(&run_contract_accept(&repo, 2, &v2_sha, "ACCEPTED"));
+    // Verify earlier entry preserved
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let revs = ledger["revisions"].as_array().unwrap();
+    assert_eq!(revs.len(), 2);
+    assert_eq!(revs[0]["revision"].as_u64().unwrap(), 1);
+    assert_eq!(revs[0]["sha256"].as_str().unwrap(), sha1);
+    assert_no_temp_files(&repo);
+}
+
+// 38. valid revision from unaccepted draft
+#[test]
+fn test_revise_from_unaccepted_draft() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert!(
+        !repo.join(".mrgs").join("accepted-contract.json").exists(),
+        "no ledger should exist"
+    );
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(out.starts_with("DRAFT"), "stdout: {}", out);
+    assert!(out.contains("2"), "revision should be 2: {}", out);
+    assert!(out.contains(&v2_sha), "stdout: {}", out);
+    assert_no_temp_files(&repo);
+}
+
+// 39. valid revision from accepted state
+#[test]
+fn test_revise_from_accepted_state() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(out.starts_with("REVISION_DRAFT"), "stdout: {}", out);
+    assert!(out.contains("2"), "revision should be 2: {}", out);
+    assert!(out.contains(&v2_sha), "stdout: {}", out);
+    // accepted ledger unchanged
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    assert_eq!(ledger["revisions"].as_array().unwrap().len(), 1);
+    assert_no_temp_files(&repo);
+}
+
+// 40. chained pending revisions
+#[test]
+fn test_revise_chained_pending() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    let v3_sha = contract_sha256(&v3);
+    write_plan(&contract_path, &v3);
+    let output = run_contract_revise(&repo, &contract_path, 2, &v2_sha);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(out.contains("3"), "revision should be 3: {}", out);
+    assert!(out.contains(&v3_sha), "stdout: {}", out);
+    let draft3: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft3["revision"].as_u64().unwrap(), 3);
+    assert_no_temp_files(&repo);
+}
+
+// 41. revision increments exactly one
+#[test]
+fn test_revise_increments_exactly_one() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft2["revision"].as_u64().unwrap(), 2);
+    assert_no_temp_files(&repo);
+}
+
+// 42. revision expected-number mismatch
+#[test]
+fn test_revise_expected_number_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let output = run_contract_revise(&repo, &contract_path, 99, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("revision"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 43. revision expected-hash mismatch
+#[test]
+fn test_revise_expected_hash_mismatch() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
+    let output = run_contract_revise(&repo, &contract_path, 1, wrong_sha);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 44. revision uppercase expected SHA rejection
+#[test]
+fn test_revise_uppercase_sha_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let upper = "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEF";
+    let output = run_contract_revise(&repo, &contract_path, 1, upper);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 45. revision zero preimage rejection
+#[test]
+fn test_revise_zero_preimage_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    // Use revision 0 as expected - but the draft is at rev 1, so it's a mismatch
+    let output = run_contract_revise(
+        &repo,
+        &contract_path,
+        0,
+        &contract_sha256(valid_contract_toml()),
+    );
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 46. revision overflow rejection
+#[test]
+fn test_revise_overflow_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    // Modify draft revision to u32::MAX with valid preimage
+    let mut modified_draft: serde_json::Value = draft.clone();
+    modified_draft["revision"] = serde_json::json!(u32::MAX);
+    modified_draft["preimage"] = serde_json::json!({
+        "revision": u32::MAX - 1,
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    });
+    write_json(&repo, "contract-draft.json", &modified_draft);
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let output = run_contract_revise(&repo, &contract_path, u32::MAX, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("overflow"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 47. revision same-byte rejection
+#[test]
+fn test_revise_same_content_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("same content") || stderr_string(&output).contains("same"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 48. revision contract-ID change rejection
+#[test]
+fn test_revise_contract_id_change_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace(
+        r#"contract_id = "test-contract-v1""#,
+        r#"contract_id = "other-contract""#,
+    );
+    write_plan(&contract_path, &v2);
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("contract ID"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 49. revision phase mismatch rejection
+#[test]
+fn test_revise_phase_mismatch_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace(r#"phase_id = "phase-1""#, r#"phase_id = "phase-2""#);
+    write_plan(&contract_path, &v2);
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("phase"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 50. revision invalid UTF-8 rejection
+#[test]
+fn test_revise_invalid_utf8_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    std::fs::write(&contract_path, [0xFF, 0xFE, 0x00, 0x61]).unwrap();
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("UTF") || stderr_string(&output).contains("utf"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 51. revision malformed TOML rejection
+#[test]
+fn test_revise_malformed_toml_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    std::fs::write(&contract_path, b"not valid toml {{{").unwrap();
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 52. revision source outside repository rejection
+#[test]
+fn test_revise_source_outside_repo() {
+    let (dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let outside = dir.path().join("outside_contract.toml");
+    write_plan(&outside, valid_contract_toml());
+    let output = run_contract_revise(&repo, &outside, 1, &contract_sha256(valid_contract_toml()));
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("outside") || stderr_string(&output).contains("repository"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 53. revision source under .mrgs rejection
+#[test]
+fn test_revise_source_under_mrgs() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let inside = repo.join(".mrgs").join("contract.toml");
+    write_plan(&inside, valid_contract_toml());
+    let output = run_contract_revise(&repo, &inside, 1, &contract_sha256(valid_contract_toml()));
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains(".mrgs"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 54. revision symlink escape rejection
+#[test]
+#[cfg_attr(not(any(unix, windows)), ignore)]
+fn test_revise_symlink_escape() {
+    let (dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let outside = dir.path().join("outside_contract.toml");
+    write_plan(&outside, valid_contract_toml());
+    let link = repo.join("link_contract.toml");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&outside, &link).unwrap();
+    let output = run_contract_revise(&repo, &link, 1, &contract_sha256(valid_contract_toml()));
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 55. exact revised source-byte persistence
+#[test]
+fn test_revise_exact_bytes() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft2["sha256"].as_str().unwrap(), v2_sha);
+    assert_eq!(
+        draft2["content"].as_str().unwrap().as_bytes(),
+        v2.as_bytes()
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 56. revised LF and CRLF distinction
+#[test]
+fn test_revise_lf_content_preservation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let contract_path = repo.join("contract.toml");
+    std::fs::write(&contract_path, LITERAL_SHA_CONTRACT).unwrap();
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let revised_lf = LITERAL_SHA_CONTRACT.replace("Literal SHA test", "Revised LF test");
+    let revised_lf_sha = contract_sha256(&revised_lf);
+    std::fs::write(&contract_path, &revised_lf).unwrap();
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft2["sha256"].as_str().unwrap(), revised_lf_sha);
+    assert_eq!(
+        draft2["content"].as_str().unwrap().as_bytes(),
+        revised_lf.as_bytes()
+    );
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_revise_crlf_content_preservation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let contract_path = repo.join("contract.toml");
+    std::fs::write(&contract_path, LITERAL_CRLF_CONTRACT).unwrap();
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let revised_crlf = LITERAL_CRLF_CONTRACT.replace("Literal SHA test", "Revised CRLF test");
+    let revised_crlf_sha = contract_sha256(&revised_crlf);
+    std::fs::write(&contract_path, &revised_crlf).unwrap();
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft2["sha256"].as_str().unwrap(), revised_crlf_sha);
+    assert_eq!(
+        draft2["content"].as_str().unwrap().as_bytes(),
+        revised_crlf.as_bytes()
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 57. normalized revised source path
+#[test]
+fn test_revise_normalized_source_path() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_path = repo.join("subdir").join("v2_contract.toml");
+    std::fs::create_dir_all(repo.join("subdir")).unwrap();
+    write_plan(&v2_path, &v2);
+    assert_success(&run_contract_revise(&repo, &v2_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sp = draft2["source_path"].as_str().unwrap();
+    assert!(
+        !sp.contains('\\'),
+        "source_path must use forward slashes: {}",
+        sp
+    );
+    assert_eq!(sp, "subdir/v2_contract.toml", "source_path: {}", sp);
+    assert_no_temp_files(&repo);
+}
+
+// 58. valid idempotent revision replay
+#[test]
+fn test_revise_idempotent_replay() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let _v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    let first = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&first);
+    // Replay the same revision call
+    let second = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&second);
+    assert_eq!(stdout_string(&first), stdout_string(&second));
+    assert_no_temp_files(&repo);
+}
+
+// 59. replay preserves every governance file
+#[test]
+fn test_revise_replay_preserves_files() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let _plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let _state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let _ledger_exists = repo.join(".mrgs").join("accepted-contract.json").exists();
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        draft_before
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 60. stale replay with different source rejection
+#[test]
+fn test_revise_stale_replay_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    // Now try to replay with wrong content - should fail CAS
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    write_plan(&contract_path, &v3);
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 61. accepted ledger preserved during revision
+#[test]
+fn test_revise_preserves_accepted_ledger() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let ledger_after = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    assert_eq!(ledger_before, ledger_after);
+    assert_no_temp_files(&repo);
+}
+
+// 62. state preserved during acceptance
+#[test]
+fn test_accept_preserves_state() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let state_after = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    assert_eq!(state_before, state_after);
+    assert_no_temp_files(&repo);
+}
+
+// 63. state preserved during revision
+#[test]
+fn test_revise_preserves_state() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let state_after = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    assert_eq!(state_before, state_after);
+    assert_no_temp_files(&repo);
+}
+
+// 64. draft preserved during acceptance
+#[test]
+fn test_accept_preserves_draft() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let draft_after = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    assert_eq!(draft_before, draft_after);
+    assert_no_temp_files(&repo);
+}
+
+// 65. accepted ledger preserved on failed acceptance
+#[test]
+fn test_failed_accept_preserves_ledger() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    // Try to accept with wrong token
+    let output = run_contract_accept(&repo, rev, &sha, "WRONG");
+    assert_failure(&output);
+    let ledger_after = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    assert_eq!(ledger_before, ledger_after);
+    assert_no_temp_files(&repo);
+}
+
+// 66. draft preserved on failed revision
+#[test]
+fn test_failed_revise_preserves_draft() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
+    let output = run_contract_revise(&repo, &contract_path, 1, wrong_sha);
+    assert_failure(&output);
+    let draft_after = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    assert_eq!(draft_before, draft_after);
+    assert_no_temp_files(&repo);
+}
+
+// 67. orphaned accepted ledger rejection
+#[test]
+fn test_orphaned_accepted_ledger_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    // Remove draft
+    std::fs::remove_file(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("orphaned")
+            || stderr_string(&output).contains("incomplete"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 68. temporary files absent after acceptance success
+#[test]
+fn test_accept_no_temp_after_success() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    assert_no_temp_files(&repo);
+}
+
+// 69. temporary files absent after revision success
+#[test]
+fn test_revise_no_temp_after_success() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    assert_no_temp_files(&repo);
+}
+
+// 70. temporary files absent after handled failures
+#[test]
+fn test_accept_no_temp_after_failure() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let output = run_contract_accept(
+        &repo,
+        1,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "ACCEPTED",
+    );
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_revise_no_temp_after_failure() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let output = run_contract_revise(
+        &repo,
+        &contract_path,
+        1,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 71. contract draft remains idempotent for revision > 1
+#[test]
+fn test_draft_idempotent_revision_greater_than_one() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    // Revise to v2
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    // Now draft is at rev 2. Contract draft with same bytes should be idempotent
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert!(
+        out.contains(draft2["sha256"].as_str().unwrap()),
+        "stdout: {}",
+        out
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 72. contract draft validates existing lifecycle authority
+#[test]
+fn test_draft_validates_lifecycle_authority() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    // Now draft at rev 1, ledger at rev 1. Contract draft with different bytes should fail
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 73. initial draft creates no accepted ledger
+#[test]
+fn test_initial_draft_no_accepted_ledger() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    assert!(
+        !repo.join(".mrgs").join("accepted-contract.json").exists(),
+        "accepted-contract.json should not exist after initial draft"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 75. replaced test has stronger coverage (revision zero + lifecycle consistency)
+#[test]
+fn test_revision_zero_rejected_in_draft() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let mut draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft["revision"] = serde_json::json!(0);
+    write_json(&repo, "contract-draft.json", &draft);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("revision"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Lifecycle consistency: contract draft creates no accepted ledger
+#[test]
+fn test_lifecycle_draft_no_ledger() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    assert!(
+        !repo.join(".mrgs").join("accepted-contract.json").exists(),
+        "DRAFT lifecycle: accepted-contract.json should not exist"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Lifecycle consistency: ACCEPTED state has matching draft and ledger
+#[test]
+fn test_lifecycle_accepted_state() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let final_rev = ledger["revisions"].as_array().unwrap().last().unwrap();
+    assert_eq!(
+        final_rev["revision"].as_u64().unwrap(),
+        draft["revision"].as_u64().unwrap(),
+        "ACCEPTED: final ledger revision must equal draft revision"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Lifecycle consistency: REVISION_DRAFT state has draft > final ledger revision
+#[test]
+fn test_lifecycle_revision_draft_state() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let final_rev = ledger["revisions"].as_array().unwrap().last().unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        final_rev < draft2["revision"].as_u64().unwrap(),
+        "REVISION_DRAFT: final ledger revision must be less than draft revision"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Orphaned ledger rejection (accepted-contract.json without contract-draft.json)
+#[test]
+fn test_orphaned_accepted_contract_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    std::fs::remove_file(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("orphaned")
+            || stderr_string(&output).contains("incomplete"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 76. revision-1 draft without preimage is valid
+#[test]
+fn test_preimage_revision_one_no_preimage() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft["revision"].as_u64().unwrap(), 1);
+    assert!(
+        draft.get("preimage").is_none() || draft["preimage"].is_null(),
+        "rev 1 must not have preimage"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 77. revision-1 draft with preimage is rejected
+#[test]
+fn test_preimage_revision_one_with_preimage_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let mut draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft["preimage"] = serde_json::json!({"revision": 0, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
+    write_json(&repo, "contract-draft.json", &draft);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("preimage"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 78. revision > 1 draft without preimage is rejected
+#[test]
+fn test_preimage_revision_greater_one_missing_preimage_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let mut draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft["revision"] = serde_json::json!(2);
+    draft["sha256"] =
+        serde_json::json!("1111111111111111111111111111111111111111111111111111111111111111");
+    // Remove preimage entirely
+    let draft_map = draft.as_object().unwrap();
+    let mut cleaned = serde_json::Map::new();
+    for (k, v) in draft_map {
+        if k != "preimage" {
+            cleaned.insert(k.clone(), v.clone());
+        }
+    }
+    write_json(
+        &repo,
+        "contract-draft.json",
+        &serde_json::Value::Object(cleaned),
+    );
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("preimage"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 79. revision > 1 draft with valid immediate preimage is valid
+#[test]
+fn test_preimage_revision_greater_one_with_valid_preimage() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft2["revision"].as_u64().unwrap(), 2);
+    assert!(
+        draft2.get("preimage").and_then(|p| p.as_object()).is_some(),
+        "rev 2 must have preimage"
+    );
+    assert_eq!(draft2["preimage"]["revision"].as_u64().unwrap(), 1);
+    assert_eq!(draft2["preimage"]["sha256"].as_str().unwrap(), sha1);
+    assert_no_temp_files(&repo);
+}
+
+// 80. preimage revision zero rejection
+#[test]
+fn test_preimage_revision_zero_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let mut draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft["revision"] = serde_json::json!(2);
+    draft["preimage"] = serde_json::json!({"revision": 0, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
+    draft["sha256"] =
+        serde_json::json!("1111111111111111111111111111111111111111111111111111111111111111");
+    write_json(&repo, "contract-draft.json", &draft);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("preimage"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 81. preimage revision mismatch rejection
+#[test]
+fn test_preimage_revision_mismatch_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let mut draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft2["preimage"]["revision"] = serde_json::json!(99);
+    write_json(&repo, "contract-draft.json", &draft2);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("preimage"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 82. malformed preimage SHA rejection
+#[test]
+fn test_preimage_malformed_sha_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let mut draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft2["preimage"]["sha256"] = serde_json::json!("not-a-valid-sha");
+    write_json(&repo, "contract-draft.json", &draft2);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 83. uppercase preimage SHA rejection
+#[test]
+fn test_preimage_uppercase_sha_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let mut draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft2["preimage"]["sha256"] =
+        serde_json::json!("ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEF");
+    write_json(&repo, "contract-draft.json", &draft2);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 84. unknown preimage JSON field rejection
+#[test]
+fn test_preimage_unknown_field_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let mut draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft2["preimage"]["unknown_field"] = serde_json::json!("extra");
+    write_json(&repo, "contract-draft.json", &draft2);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 85. null preimage rejection where absence is required
+#[test]
+fn test_preimage_null_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let mut draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft["preimage"] = serde_json::Value::Null;
+    write_json(&repo, "contract-draft.json", &draft);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("null") || stderr_string(&output).contains("preimage"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 86. normal revision stores the exact validated preimage tuple
+#[test]
+fn test_revise_stores_exact_preimage() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft2["preimage"]["revision"].as_u64().unwrap(), 1);
+    assert_eq!(draft2["preimage"]["sha256"].as_str().unwrap(), sha1);
+    assert_no_temp_files(&repo);
+}
+
+// 87. chained revisions replace the receipt with immediately preceding tuple
+#[test]
+fn test_revise_chained_replaces_preimage() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    write_plan(&contract_path, &v3);
+    assert_success(&run_contract_revise(&repo, &contract_path, 2, &v2_sha));
+    let draft3: serde_json::Value = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft3["preimage"]["revision"].as_u64().unwrap(), 2);
+    assert_eq!(draft3["preimage"]["sha256"].as_str().unwrap(), v2_sha);
+    assert_no_temp_files(&repo);
+}
+
+// 88. replay with the exact stored preimage succeeds
+#[test]
+fn test_revise_replay_exact_preimage_succeeds() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 89. replay with an arbitrary valid wrong SHA fails
+#[test]
+fn test_revise_replay_wrong_sha_fails() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let valid_but_wrong = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let output = run_contract_revise(&repo, &contract_path, 1, valid_but_wrong);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 90. replay with an older accepted revision SHA fails
+// Multi-revision fixture: draft v1 accepted, revised to v2, then to v3.
+// Attempt replay of the v2→v3 transition with:
+//   expected-revision = 2 (correct immediate predecessor)
+//   expected-sha256   = sha1 (older accepted SHA, NOT the v2 preimage SHA)
+//   exact v3 source path and bytes unchanged.
+// The replay preimage SHA check must reject before same-content fires.
+#[test]
+fn test_revise_replay_older_accepted_sha_fails() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    // Accept revision 1
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    // Revise to v2
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    // Revise to v3
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    write_plan(&contract_path, &v3);
+    assert_success(&run_contract_revise(&repo, &contract_path, 2, &v2_sha));
+    // Keep exact v3 source bytes unchanged — do NOT write v4.
+    // Snapshot all governance files before replay attempt
+    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    // Attempt replay: expected-revision=2 (correct predecessor), expected-sha256=sha1 (wrong SHA).
+    // The replay handler detects the preimage SHA mismatch before same-content would fire.
+    let output = run_contract_revise(&repo, &contract_path, 2, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    // Prove every governance file is unchanged
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        plan_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        draft_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
+        ledger_before
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Positive control: same fixture, replay with correct immediate preimage succeeds
+// and returns REVISION_DRAFT because rev 1 is accepted and v3 is pending.
+// 90b. positive control — correct immediate preimage replay succeeds
+#[test]
+fn test_revise_replay_correct_immediate_preimage_succeeds() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    // Accept revision 1
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    // Revise to v2
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    // Revise to v3
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    let v3_sha = contract_sha256(&v3);
+    write_plan(&contract_path, &v3);
+    assert_success(&run_contract_revise(&repo, &contract_path, 2, &v2_sha));
+    // Replay with correct immediate preimage: expected-revision=2, expected-sha256=v2_sha
+    let output = run_contract_revise(&repo, &contract_path, 2, &v2_sha);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(
+        out.starts_with("REVISION_DRAFT"),
+        "expected REVISION_DRAFT, got: {}",
+        out
+    );
+    assert!(out.contains("3"), "expected revision 3 in output: {}", out);
+    assert!(out.contains(&v3_sha), "expected v3 sha in output: {}", out);
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_revise_replay_changed_bytes_is_terminal_and_preserves_files() {
+    let (_dir, repo, contract_path, _sha1, v2_sha, _v3_sha) = setup_three_revision_contract();
+    let changed_v3 = valid_contract_toml().replace("Test objective", "Changed V3 objective");
+    write_plan(&contract_path, &changed_v3);
+    let before = governance_bytes(&repo);
+
+    let output = run_contract_revise(&repo, &contract_path, 2, &v2_sha);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("replay content mismatch"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_eq!(
+        read_json(&repo, "contract-draft.json")["revision"].as_u64(),
+        Some(3)
+    );
+    assert_governance_bytes_unchanged(&repo, &before);
+}
+
+#[test]
+fn test_revise_replay_changed_path_is_terminal_and_preserves_files() {
+    let (_dir, repo, contract_path, _sha1, v2_sha, _v3_sha) = setup_three_revision_contract();
+    let alternate_path = repo.join("alternate-v3.toml");
+    std::fs::copy(&contract_path, &alternate_path).unwrap();
+    let before = governance_bytes(&repo);
+
+    let output = run_contract_revise(&repo, &alternate_path, 2, &v2_sha);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("replay source path mismatch"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_eq!(
+        read_json(&repo, "contract-draft.json")["revision"].as_u64(),
+        Some(3)
+    );
+    assert_governance_bytes_unchanged(&repo, &before);
+}
+
+#[test]
+fn test_revise_replay_exact_positive_preserves_files() {
+    let (_dir, repo, contract_path, _sha1, v2_sha, v3_sha) = setup_three_revision_contract();
+    let before = governance_bytes(&repo);
+
+    let output = run_contract_revise(&repo, &contract_path, 2, &v2_sha);
+    assert_success(&output);
+    assert_eq!(
+        stdout_string(&output),
+        format!("REVISION_DRAFT test-contract-v1 3 {}", v3_sha)
+    );
+    assert_governance_bytes_unchanged(&repo, &before);
+}
+
+#[test]
+fn test_revise_normal_cas_from_revision_three_creates_revision_four() {
+    let (_dir, repo, contract_path, _sha1, _v2_sha, v3_sha) = setup_three_revision_contract();
+    let v4 = valid_contract_toml().replace("Test objective", "V4 objective");
+    let v4_sha = contract_sha256(&v4);
+    write_plan(&contract_path, &v4);
+
+    let output = run_contract_revise(&repo, &contract_path, 3, &v3_sha);
+    assert_success(&output);
+    assert_eq!(
+        stdout_string(&output),
+        format!("REVISION_DRAFT test-contract-v1 4 {}", v4_sha)
+    );
+    let draft = read_json(&repo, "contract-draft.json");
+    assert_eq!(draft["revision"].as_u64(), Some(4));
+    assert_eq!(draft["preimage"]["revision"].as_u64(), Some(3));
+    assert_eq!(draft["preimage"]["sha256"].as_str(), Some(v3_sha.as_str()));
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_revise_revision_three_same_content_rejected_without_write() {
+    let (_dir, repo, contract_path, _sha1, _v2_sha, v3_sha) = setup_three_revision_contract();
+    let before = governance_bytes(&repo);
+
+    let output = run_contract_revise(&repo, &contract_path, 3, &v3_sha);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("same content"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_governance_bytes_unchanged(&repo, &before);
+}
+
+// 91. replay with the correct revision and wrong SHA fails
+#[test]
+fn test_revise_replay_correct_rev_wrong_sha() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let wrong_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let output = run_contract_revise(&repo, &contract_path, 1, wrong_sha);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 92. replay with the correct SHA and wrong revision fails
+#[test]
+fn test_revise_replay_correct_sha_wrong_rev() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let output = run_contract_revise(&repo, &contract_path, 99, &sha1);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 93. replay older by more than one revision fails
+#[test]
+fn test_revise_replay_older_by_more_than_one() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    let v2_sha = contract_sha256(&v2);
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    write_plan(&contract_path, &v3);
+    assert_success(&run_contract_revise(&repo, &contract_path, 2, &v2_sha));
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 94. replay with same content from different normalized source path fails
+#[test]
+fn test_revise_replay_different_source_path_fails() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let alt_path = repo.join("alt_contract.toml");
+    write_plan(&alt_path, &v2);
+    let output = run_contract_revise(&repo, &alt_path, 1, &sha1);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 95. replay after acceptance returns ACCEPTED
+#[test]
+fn test_revise_replay_after_acceptance_returns_accepted() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha2 = draft2["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 2, &sha2, "ACCEPTED"));
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(
+        out.starts_with("ACCEPTED"),
+        "expected ACCEPTED, got: {}",
+        out
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 96. replay before first acceptance returns DRAFT
+#[test]
+fn test_revise_replay_before_acceptance_returns_draft() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(out.starts_with("DRAFT"), "expected DRAFT, got: {}", out);
+    assert_no_temp_files(&repo);
+}
+
+// 97. replay with older accepted ledger returns REVISION_DRAFT
+#[test]
+fn test_revise_replay_with_older_ledger_returns_revision_draft() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_success(&output);
+    let out = stdout_string(&output);
+    assert!(
+        out.starts_with("REVISION_DRAFT"),
+        "expected REVISION_DRAFT, got: {}",
+        out
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 98. malformed receipt preserves every governance file byte-for-byte
+#[test]
+fn test_revise_malformed_receipt_preserves_files() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let mut draft_val: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft_val["preimage"]["sha256"] = serde_json::json!("invalid");
+    write_json(&repo, "contract-draft.json", &draft_val);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        plan_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        state_before
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 99. accepted ledger entries contain no preimage field
+#[test]
+fn test_accepted_ledger_no_preimage() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    for rev_entry in ledger["revisions"].as_array().unwrap() {
+        assert!(
+            rev_entry.get("preimage").is_none(),
+            "accepted revision must not contain preimage"
+        );
+    }
+    assert_no_temp_files(&repo);
+}
+
+// 100. acceptance preserves the draft preimage receipt byte-for-byte
+#[test]
+fn test_accept_preserves_draft_preimage() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha2 = draft2["sha256"].as_str().unwrap().to_string();
+    let rev2 = draft2["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev2, &sha2, "ACCEPTED"));
+    let draft_after = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    assert_eq!(
+        draft_before, draft_after,
+        "acceptance must preserve draft including preimage"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// 101. contract draft proves exact submitted-byte equality in addition to digest equality
+#[test]
+fn test_draft_exact_byte_equality_required() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let original_sha = draft["sha256"].as_str().unwrap().to_string();
+    let mut corrupted = draft.clone();
+    corrupted["sha256"] = serde_json::json!(original_sha);
+    corrupted["content"] =
+        serde_json::json!("different content that does not match original bytes");
+    write_json(&repo, "contract-draft.json", &corrupted);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// 102. comparator-level regression: equal digest but unequal content cannot authorize idempotency
+#[test]
+fn test_draft_equal_digest_unequal_content_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let fake_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut draft_val: serde_json::Value = read_json(&repo, "contract-draft.json");
+    draft_val["sha256"] = serde_json::json!(fake_sha);
+    draft_val["content"] = serde_json::json!("different content with a different byte sequence");
+    write_json(&repo, "contract-draft.json", &draft_val);
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert_no_temp_files(&repo);
+}
+
+// ===== Cross-record contract-ID consistency (Blocker 1) =====
+
+fn setup_contract_id_mismatch_fixture(
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    // Revise to v2 so draft revision > ledger final revision (REVISION_DRAFT state)
+    let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+    write_plan(&contract_path, &v2);
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+    // Now modify the accepted ledger: change contract_id to a different value,
+    // and update revision content + SHA to match the new contract_id.
+    let other_content = valid_contract_toml().replace(
+        r#"contract_id = "test-contract-v1""#,
+        r#"contract_id = "other-contract-v1""#,
+    );
+    let other_sha = contract_sha256(&other_content);
+    let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
+    ledger["contract_id"] = serde_json::json!("other-contract-v1");
+    ledger["revisions"][0]["content"] = serde_json::json!(other_content);
+    ledger["revisions"][0]["sha256"] = serde_json::json!(other_sha);
+    write_json(&repo, "accepted-contract.json", &ledger);
+    (_dir, repo, contract_path)
+}
+
+// Blocker 1 test 1: contract draft idempotent registration rejected
+#[test]
+fn test_contract_id_mismatch_draft_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_id_mismatch_fixture();
+    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    let output = run_contract_draft(&repo, &contract_path);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("contract ID"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        plan_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        draft_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
+        ledger_before
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Blocker 1 test 2: normal contract revise rejected
+#[test]
+fn test_contract_id_mismatch_revise_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_id_mismatch_fixture();
+    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    let draft_val: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha2 = draft_val["sha256"].as_str().unwrap().to_string();
+    let v3 = valid_contract_toml().replace("Test objective", "V3 objective");
+    write_plan(&contract_path, &v3);
+    let output = run_contract_revise(&repo, &contract_path, 2, &sha2);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("contract ID"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        plan_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        draft_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
+        ledger_before
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Blocker 1 test 3: contract revision replay rejected
+#[test]
+fn test_contract_id_mismatch_replay_rejected() {
+    let (_dir, repo, contract_path) = setup_contract_id_mismatch_fixture();
+    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    let sha1 = contract_sha256(valid_contract_toml());
+    let output = run_contract_revise(&repo, &contract_path, 1, &sha1);
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("contract ID") || stderr_string(&output).contains("SHA"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        plan_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        draft_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
+        ledger_before
+    );
+    assert_no_temp_files(&repo);
+}
+
+// Blocker 1 test 4: lifecycle inference (accept) rejected under mismatched authority
+#[test]
+fn test_contract_id_mismatch_accept_rejected() {
+    let (_dir, repo, _contract_path) = setup_contract_id_mismatch_fixture();
+    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    let draft_val: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha2 = draft_val["sha256"].as_str().unwrap().to_string();
+    let output = run_contract_accept(&repo, 2, &sha2, "ACCEPTED");
+    assert_failure(&output);
+    assert!(
+        stderr_string(&output).contains("contract ID"),
+        "stderr: {}",
+        stderr_string(&output)
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
+        plan_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
+        draft_before
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
+        ledger_before
+    );
+    assert_no_temp_files(&repo);
 }

@@ -60,4 +60,24 @@ pub enum ContractAction {
         #[arg(long)]
         contract: String,
     },
+    Accept {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        revision: u32,
+        #[arg(long)]
+        sha256: String,
+        #[arg(long)]
+        decision: String,
+    },
+    Revise {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        contract: String,
+        #[arg(long = "expected-revision")]
+        expected_revision: u32,
+        #[arg(long = "expected-sha256")]
+        expected_sha256: String,
+    },
 }

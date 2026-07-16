@@ -167,12 +167,119 @@ pub enum Error {
     #[error("unsupported contract draft schema version: {0}")]
     UnsupportedDraftSchema(u32),
 
-    #[error("contract draft revision must be 1, got {0}")]
-    DraftRevisionNotOne(u32),
+    #[error("contract draft revision must be at least 1, got 0")]
+    DraftRevisionZero,
 
     #[error("contract draft field mismatch: {0}")]
     DraftFieldMismatch(String),
 
     #[error("contract draft content hash mismatch")]
     DraftContentHashMismatch,
+
+    #[error("contract command requires a valid draft")]
+    ContractNoDraft,
+
+    #[error("contract accept revision {supplied} does not match draft revision {expected}")]
+    ContractAcceptRevisionMismatch { supplied: u32, expected: u32 },
+
+    #[error("contract accept SHA does not match draft SHA")]
+    ContractAcceptShaMismatch,
+
+    #[error("contract accept decision must be exactly ACCEPTED, got '{0}'")]
+    ContractAcceptDecisionInvalid(String),
+
+    #[error("accepted contract plan SHA mismatch")]
+    AcceptedContractPlanShaMismatch,
+
+    #[error("accepted contract phase mismatch: expected '{expected}', got '{actual}'")]
+    AcceptedContractPhaseMismatch { expected: String, actual: String },
+
+    #[error("accepted contract revision zero")]
+    AcceptedContractRevisionZero,
+
+    #[error("duplicate accepted revision: {0}")]
+    AcceptedContractDuplicateRevision(u32),
+
+    #[error("non-increasing accepted revision: {0} follows {1}")]
+    AcceptedContractNonIncreasingRevision(u32, u32),
+
+    #[error("accepted contract source path under .mrgs")]
+    AcceptedContractSourceUnderMrgs,
+
+    #[error("accepted contract content parse error")]
+    AcceptedContractContentParse,
+
+    #[error("accepted contract content phase mismatch")]
+    AcceptedContractContentPhaseMismatch,
+
+    #[error("accepted contract content ID mismatch")]
+    AcceptedContractContentIdMismatch,
+
+    #[error("accepted contract content hash mismatch")]
+    AcceptedContractContentHashMismatch,
+
+    #[error("accepted contract final revision {revision} exceeds draft revision {draft_revision}")]
+    AcceptedContractFinalRevisionExceedsDraft { revision: u32, draft_revision: u32 },
+
+    #[error("accepted contract final revision equals draft but content differs")]
+    AcceptedContractEqualRevisionContentMismatch,
+
+    #[error("accepted contract revisions list is empty")]
+    AcceptedContractEmptyRevisions,
+
+    #[error("accepted contract ID '{accepted}' does not match draft contract ID '{draft}'")]
+    AcceptedContractDraftContractIdMismatch { accepted: String, draft: String },
+
+    #[error("contract revise expected revision {supplied} does not match current {current}")]
+    ContractReviseExpectedRevisionMismatch { supplied: u32, current: u32 },
+
+    #[error("contract revise expected SHA does not match current draft SHA")]
+    ContractReviseExpectedShaMismatch,
+
+    #[error("contract revise would produce same content as current draft")]
+    ContractReviseSameContent,
+
+    #[error("contract revision overflow")]
+    ContractReviseOverflow,
+
+    #[error("contract revise contract ID mismatch: supplied '{supplied}', expected '{expected}'")]
+    ContractReviseContractIdMismatch { supplied: String, expected: String },
+
+    #[error("contract revise replay preimage SHA mismatch: expected '{expected}', preimage has '{actual}'")]
+    ContractReviseReplayShaMismatch { expected: String, actual: String },
+
+    #[error("contract revise replay preimage revision mismatch: expected {expected}, preimage has {actual}")]
+    ContractReviseReplayRevisionMismatch { expected: u32, actual: u32 },
+
+    #[error("contract revise replay content mismatch")]
+    ContractReviseReplayContentMismatch,
+
+    #[error("contract revise replay source path mismatch")]
+    ContractReviseReplaySourcePathMismatch,
+
+    #[error("contract revise replay preimage is missing")]
+    ContractReviseReplayPreimageMissing,
+
+    #[error("contract revise replay phase mismatch")]
+    ContractReviseReplayPhaseMismatch,
+
+    #[error("contract revise replay contract ID mismatch")]
+    ContractReviseReplayContractIdMismatch,
+
+    #[error("orphaned accepted-contract.json without contract-draft.json")]
+    OrphanedAcceptedContract,
+    #[error("contract draft revision 1 must not have a preimage")]
+    DraftPreimageUnexpected,
+    #[error("contract draft revision {draft_revision} requires a preimage")]
+    DraftPreimageRequired { draft_revision: u32 },
+    #[error("contract draft preimage revision must be positive")]
+    DraftPreimageRevisionZero,
+    #[error("contract draft preimage revision {preimage_revision} does not equal draft revision {draft_revision} - 1 = {expected}")]
+    DraftPreimageRevisionMismatch {
+        preimage_revision: u32,
+        draft_revision: u32,
+        expected: u32,
+    },
+    #[error("contract draft preimage sha256 is invalid")]
+    DraftPreimageShaInvalid,
 }
