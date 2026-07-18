@@ -12,6 +12,7 @@ pub enum CliCommand {
     Plan(PlanSub),
     Phase(PhaseSub),
     Contract(ContractSub),
+    Implementation(ImplementationSub),
 }
 
 #[derive(clap::Args, Debug)]
@@ -79,5 +80,27 @@ pub enum ContractAction {
         expected_revision: u32,
         #[arg(long = "expected-sha256")]
         expected_sha256: String,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ImplementationSub {
+    #[command(subcommand)]
+    pub action: ImplementationAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ImplementationAction {
+    Begin {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        sha256: String,
+    },
+    Check {
+        #[arg(long)]
+        repo: String,
     },
 }

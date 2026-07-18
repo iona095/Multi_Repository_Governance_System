@@ -95,6 +95,10 @@ pub enum Error {
     #[error("state record schema version: expected 1, got {0}")]
     StateSchemaVersion(u32),
 
+    #[error("invalid argument")]
+    InvalidArgument,
+    #[error("governance authority invalid")]
+    GovernanceAuthorityInvalid,
     #[error("invalid SHA-256 hex string")]
     InvalidSha256,
 
@@ -282,4 +286,193 @@ pub enum Error {
     },
     #[error("contract draft preimage sha256 is invalid")]
     DraftPreimageShaInvalid,
+
+    // Phase 4 errors
+    #[error("GIT_COMMAND_FAILED")]
+    GitCommandFailed(String),
+    #[error("GIT_ROOT_MISMATCH")]
+    GitRootMismatch,
+    #[error("GIT_DETACHED_HEAD")]
+    GitDetachedHead,
+    #[error("GIT_HEAD_INVALID")]
+    GitHeadInvalid,
+    #[error("GIT_DIRTY")]
+    GitDirty,
+    #[error("GIT_OPERATION_IN_PROGRESS")]
+    GitOperationInProgress,
+    #[error("GIT_SUBMODULE_UNSUPPORTED")]
+    GitSubmoduleUnsupported,
+    #[error("CONTRACT_NOT_ACCEPTED")]
+    ContractNotAccepted,
+    #[error("REQUESTED_REVISION_STALE")]
+    RequestedRevisionStale,
+    #[error("REQUESTED_SHA_STALE")]
+    RequestedShaStale,
+    #[error("CONTRACT_PATH_RULE_INVALID")]
+    ContractPathRuleInvalid,
+    #[error("IMPLEMENTATION_AUTHORITY_MISSING")]
+    ImplementationAuthorityMissing,
+    #[error("IMPLEMENTATION_AUTHORITY_INVALID")]
+    ImplementationAuthorityInvalid,
+    #[error("IMPLEMENTATION_AUTHORITY_CONFLICT")]
+    ImplementationAuthorityConflict,
+    #[error("IMPLEMENTATION_AUTHORITY_STALE")]
+    ImplementationAuthorityStale,
+    #[error("BASELINE_BRANCH_CHANGED")]
+    BaselineBranchChanged,
+    #[error("BASELINE_COMMIT_MISSING")]
+    BaselineCommitMissing,
+    #[error("BASELINE_HISTORY_CHANGED")]
+    BaselineHistoryChanged,
+    #[error("GIT_INVENTORY_INVALID")]
+    GitInventoryInvalid,
+    #[error("GIT_CONFLICT")]
+    GitConflict,
+    #[error("CHANGE_PATH_INVALID")]
+    ChangePathInvalid,
+    #[error("CHANGE_FORBIDDEN")]
+    ChangeForbidden,
+    #[error("CHANGE_NOT_ALLOWED")]
+    ChangeNotAllowed,
+    #[error("FILESYSTEM_BOUNDARY_UNSAFE")]
+    FilesystemBoundaryUnsafe,
+    #[error("REPOSITORY_INVALID")]
+    RepositoryInvalid,
+    #[error("PERSISTENCE_FAILED")]
+    PersistenceFailed,
+}
+
+impl Error {
+    pub fn phase4_category(&self) -> &'static str {
+        match self {
+            Error::InvalidArgument => "INVALID_ARGUMENT",
+            Error::GitCommandFailed(_) => "GIT_COMMAND_FAILED",
+            Error::GitRootMismatch => "GIT_ROOT_MISMATCH",
+            Error::GitDetachedHead => "GIT_DETACHED_HEAD",
+            Error::GitHeadInvalid => "GIT_HEAD_INVALID",
+            Error::GitDirty => "GIT_DIRTY",
+            Error::GitOperationInProgress => "GIT_OPERATION_IN_PROGRESS",
+            Error::GitSubmoduleUnsupported => "GIT_SUBMODULE_UNSUPPORTED",
+            Error::ContractNotAccepted => "CONTRACT_NOT_ACCEPTED",
+            Error::RequestedRevisionStale => "REQUESTED_REVISION_STALE",
+            Error::RequestedShaStale => "REQUESTED_SHA_STALE",
+            Error::ContractPathRuleInvalid => "CONTRACT_PATH_RULE_INVALID",
+            Error::ImplementationAuthorityMissing => "IMPLEMENTATION_AUTHORITY_MISSING",
+            Error::ImplementationAuthorityInvalid => "IMPLEMENTATION_AUTHORITY_INVALID",
+            Error::ImplementationAuthorityConflict => "IMPLEMENTATION_AUTHORITY_CONFLICT",
+            Error::ImplementationAuthorityStale => "IMPLEMENTATION_AUTHORITY_STALE",
+            Error::BaselineBranchChanged => "BASELINE_BRANCH_CHANGED",
+            Error::BaselineCommitMissing => "BASELINE_COMMIT_MISSING",
+            Error::BaselineHistoryChanged => "BASELINE_HISTORY_CHANGED",
+            Error::GitInventoryInvalid => "GIT_INVENTORY_INVALID",
+            Error::GitConflict => "GIT_CONFLICT",
+            Error::ChangePathInvalid => "CHANGE_PATH_INVALID",
+            Error::ChangeForbidden => "CHANGE_FORBIDDEN",
+            Error::ChangeNotAllowed => "CHANGE_NOT_ALLOWED",
+            Error::FilesystemBoundaryUnsafe => "FILESYSTEM_BOUNDARY_UNSAFE",
+            Error::RepositoryInvalid => "REPOSITORY_INVALID",
+            Error::PersistenceFailed => "PERSISTENCE_FAILED",
+            // In the Phase 4 adapter context, an unhandled I/O error is an
+            // authority read failure, never a generic persistence failure
+            // (BLOCKER 9). Explicit publication I/O already maps to
+            // PERSISTENCE_FAILED via Error::PersistenceFailed.
+            Error::Io(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::GovDirNotExists(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::PlanIdMismatch(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::PlanDrift { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedPlanMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::NoAcceptedPlan(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::NoState(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::TomlParse(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::JsonParse(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::Utf8(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::PlanOutsideRepo(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::PlanNotFound(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::NotRegularFile(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::NotDirectory(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnsupportedSchema(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::EmptyPlanId => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ZeroPhases => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::EmptyPhaseId => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::EmptyPhaseTitle => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DuplicatePhaseId(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnknownDependency(_, _) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::SelfDependency(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DependencyCycle => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::StateShaMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedSchemaVersion(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::StateSchemaVersion(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::InvalidSha256 => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnknownPhase(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ActivePhaseConflict(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::BlockedDependency(_, _) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::EmptyPlanPath => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnsafePlanPath(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::PlanPathOutsideRepo => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::GovDirNotDirectory(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::GovDirEscape(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::IncompleteGovernanceAuthority(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ActivePhaseDependencyUnmet(_, _) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnauthorizedFilename(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnsupportedContractSchema(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::EmptyContractField(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::EmptyContractList(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::EmptyContractListEntry(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DuplicateContractListEntry(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::NoActivePhase => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractPhaseMismatch(_, _) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractSourceInsideMrgs => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractSourceOutsideRepo => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractDraftConflict => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnsupportedDraftSchema(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftRevisionZero => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftFieldMismatch(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftContentHashMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractNoDraft => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractAcceptRevisionMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractAcceptShaMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractAcceptDecisionInvalid(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractPlanShaMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractPhaseMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractRevisionZero => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractDuplicateRevision(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractNonIncreasingRevision(_, _) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractSourceUnderMrgs => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractContentParse => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractContentPhaseMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractContentIdMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractContentHashMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractFinalRevisionExceedsDraft { .. } => {
+                "GOVERNANCE_AUTHORITY_INVALID"
+            }
+            Error::AcceptedContractEqualRevisionContentMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractEmptyRevisions => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::AcceptedContractDraftContractIdMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseExpectedRevisionMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseExpectedShaMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseSameContent => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseOverflow => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseContractIdMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseReplayShaMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseReplayRevisionMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseReplayContentMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseReplaySourcePathMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseReplayPreimageMissing => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseReplayPhaseMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ContractReviseReplayContractIdMismatch => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::OrphanedAcceptedContract => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftPreimageUnexpected => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftPreimageRequired { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftPreimageRevisionZero => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftPreimageRevisionMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DraftPreimageShaInvalid => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::GovernanceAuthorityInvalid => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::PhaseCountMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnknownClosedPhase(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::DuplicateClosedPhase(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::UnknownActivePhase(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::ActivePhaseAlsoClosed(_) => "GOVERNANCE_AUTHORITY_INVALID",
+            Error::InconsistentClosedDep(_, _) => "GOVERNANCE_AUTHORITY_INVALID",
+        }
+    }
 }

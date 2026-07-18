@@ -1,8 +1,11 @@
 mod cli;
 mod contract;
 mod error;
+mod git;
+mod implementation;
 mod path;
 mod plan;
+mod rules;
 mod state;
 
 use clap::Parser;
@@ -12,27 +15,43 @@ use std::path::{Path, PathBuf};
 fn main() {
     let cli = cli::Cli::parse();
 
-    let result = match cli.command {
+    let (result, is_phase4) = match cli.command {
         cli::CliCommand::Plan(sub) => match sub.action {
-            cli::PlanAction::Accept { repo, plan } => cmd_plan_accept(&repo, &plan),
+            cli::PlanAction::Accept { repo, plan } => (cmd_plan_accept(&repo, &plan), false),
         },
         cli::CliCommand::Phase(sub) => match sub.action {
-            cli::PhaseAction::Select { repo, phase } => cmd_phase_select(&repo, &phase),
+            cli::PhaseAction::Select { repo, phase } => (cmd_phase_select(&repo, &phase), false),
         },
         cli::CliCommand::Contract(sub) => match sub.action {
-            cli::ContractAction::Draft { repo, contract } => cmd_contract_draft(&repo, &contract),
+            cli::ContractAction::Draft { repo, contract } => {
+                (cmd_contract_draft(&repo, &contract), false)
+            }
             cli::ContractAction::Accept {
                 repo,
                 revision,
                 sha256,
                 decision,
-            } => cmd_contract_accept(&repo, revision, &sha256, &decision),
+            } => (
+                cmd_contract_accept(&repo, revision, &sha256, &decision),
+                false,
+            ),
             cli::ContractAction::Revise {
                 repo,
                 contract,
                 expected_revision,
                 expected_sha256,
-            } => cmd_contract_revise(&repo, &contract, expected_revision, &expected_sha256),
+            } => (
+                cmd_contract_revise(&repo, &contract, expected_revision, &expected_sha256),
+                false,
+            ),
+        },
+        cli::CliCommand::Implementation(sub) => match sub.action {
+            cli::ImplementationAction::Begin {
+                repo,
+                revision,
+                sha256,
+            } => (cmd_implementation_begin(&repo, &revision, &sha256), true),
+            cli::ImplementationAction::Check { repo } => (cmd_implementation_check(&repo), true),
         },
     };
 
@@ -42,7 +61,12 @@ fn main() {
             std::process::exit(0);
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            if is_phase4 {
+                let cat = e.phase4_category();
+                eprintln!("error: {}", cat);
+            } else {
+                eprintln!("error: {}", e);
+            }
             std::process::exit(1);
         }
     }
@@ -662,4 +686,16 @@ fn cmd_contract_revise(
         "{} {} {} {}",
         prefix, new_draft.contract_id, new_draft.revision, new_draft.sha256
     ))
+}
+
+fn cmd_implementation_begin(
+    repo_arg: &str,
+    revision_token: &str,
+    sha256_arg: &str,
+) -> Result<String, error::Error> {
+    implementation::cmd_implementation_begin(repo_arg, revision_token, sha256_arg)
+}
+
+fn cmd_implementation_check(repo_arg: &str) -> Result<String, error::Error> {
+    implementation::cmd_implementation_check(repo_arg)
 }

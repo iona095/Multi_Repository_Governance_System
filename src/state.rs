@@ -99,6 +99,22 @@ pub struct AcceptedRevision {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImplementationAuthority {
+    pub schema_version: u32,
+    pub accepted_plan_sha256: String,
+    pub phase_id: String,
+    pub contract_id: String,
+    pub contract_revision: u32,
+    pub contract_source_path: String,
+    pub contract_sha256: String,
+    pub contract_content: String,
+    pub git_object_format: String,
+    pub baseline_head: String,
+    pub baseline_branch: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GovernanceState {
     pub schema_version: u32,
     pub accepted_plan_sha256: String,
@@ -180,7 +196,11 @@ fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn validate_governance_filename(filename: &str) -> Result<(), crate::error::Error> {
     match filename {
-        "accepted-plan.json" | "state.json" | "contract-draft.json" | "accepted-contract.json" => {}
+        "accepted-plan.json"
+        | "state.json"
+        | "contract-draft.json"
+        | "accepted-contract.json"
+        | "implementation-authority.json" => {}
         _ => {
             return Err(crate::error::Error::UnauthorizedFilename(
                 filename.to_string(),
@@ -280,7 +300,8 @@ pub fn read_accepted_plan(repo_path: &Path) -> Result<AcceptedPlan, crate::error
     if !path.exists() {
         return Err(crate::error::Error::NoAcceptedPlan(repo_path.to_path_buf()));
     }
-    let bytes = std::fs::read(&path)?;
+    let bytes =
+        std::fs::read(&path).map_err(|_| crate::error::Error::GovernanceAuthorityInvalid)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -289,7 +310,8 @@ pub fn read_state(repo_path: &Path) -> Result<GovernanceState, crate::error::Err
     if !path.exists() {
         return Err(crate::error::Error::NoState(repo_path.to_path_buf()));
     }
-    let bytes = std::fs::read(&path)?;
+    let bytes =
+        std::fs::read(&path).map_err(|_| crate::error::Error::GovernanceAuthorityInvalid)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -501,14 +523,18 @@ pub fn is_draft_idempotent(
 
 pub fn read_contract_draft(gov_dir: &Path) -> Result<ContractDraft, crate::error::Error> {
     let path = gov_dir.join("contract-draft.json");
-    Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+    let bytes =
+        std::fs::read(&path).map_err(|_| crate::error::Error::GovernanceAuthorityInvalid)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub fn read_accepted_contract_ledger(
     gov_dir: &Path,
 ) -> Result<AcceptedContractLedger, crate::error::Error> {
     let path = gov_dir.join("accepted-contract.json");
-    Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+    let bytes =
+        std::fs::read(&path).map_err(|_| crate::error::Error::GovernanceAuthorityInvalid)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub fn validate_accepted_contract_ledger(
@@ -664,6 +690,7 @@ mod tests {
         assert!(validate_governance_filename("state.json").is_ok());
         assert!(validate_governance_filename("contract-draft.json").is_ok());
         assert!(validate_governance_filename("accepted-contract.json").is_ok());
+        assert!(validate_governance_filename("implementation-authority.json").is_ok());
     }
 
     #[test]
