@@ -283,6 +283,16 @@ fn is_reparse_point_not_symlink(_meta: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Reject every unsafe existing ancestor in the live changed-path topology.
+/// Genuine symlinks are unsafe on every platform; Windows junctions and other
+/// non-symlink reparse points are additionally rejected by the platform helper.
+fn reject_unsafe_ancestor_metadata(meta: &std::fs::Metadata) -> Result<(), Error> {
+    if meta.file_type().is_symlink() || is_reparse_point_not_symlink(meta) {
+        return Err(Error::FilesystemBoundaryUnsafe);
+    }
+    Ok(())
+}
+
 /// Centralized validator for the implementation-authority file. Proves, before
 /// reading, that the path is exactly the fixed filename, a direct child of the
 /// validated `.mrgs` directory, a regular file, not a directory, symlink,
@@ -565,11 +575,51 @@ pub fn validate_operation_state(git: &GitRunner) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn validate_index_structure(git: &GitRunner, objfmt: &str) -> Result<(), Error> {
+/// Strictly parse the complete `--sparse --stage -z` index and return the set
+/// of repository-relative paths whose first segment is exactly `.mrgs`. The
+/// caller uses this set to gate the begin-time governance-path exemption on the
+/// Section 6.4 proof that no tracked index entry exists for each fixed
+/// governance path (contract §6.5). All stage/mode/classification errors are
+/// surfaced before any path is collected.
+pub fn tracked_governance_paths(git: &GitRunner, objfmt: &str) -> Result<Vec<String>, Error> {
     let out = git.run(["ls-files", "--sparse", "--stage", "-z"])?;
     // Any execution failure (spawn/runner failure, signal, non-zero exit) is
     // GIT_COMMAND_FAILED; only exit-zero malformed records are
     // GIT_INVENTORY_INVALID (BLOCKER 8).
+    if !out.status.success() {
+        return Err(Error::GitCommandFailed(
+            "ls-files --sparse --stage failed".into(),
+        ));
+    }
+
+    let mut tracked: Vec<String> = Vec::new();
+    let stdout = out.stdout;
+    let mut i = 0;
+    while i < stdout.len() {
+        if stdout[i..].is_empty() {
+            break;
+        }
+        let nul = stdout[i..]
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or(Error::GitInventoryInvalid)?;
+        let record = &stdout[i..i + nul];
+        i += nul + 1;
+
+        let parsed = parse_index_stage_record(record, objfmt)?;
+        let first_seg = parsed.path.split('/').next().unwrap_or("");
+        if first_seg.eq_ignore_ascii_case(".mrgs") {
+            tracked.push(parsed.path);
+        }
+    }
+    Ok(tracked)
+}
+
+pub fn validate_index_structure(git: &GitRunner, objfmt: &str) -> Result<(), Error> {
+    // Classification errors (conflict, gitlink, sparse-directory, malformed
+    // mode/object/path) are invariant whether or not the tracked-governance set
+    // is retained, so run the full structural pass first.
+    let out = git.run(["ls-files", "--sparse", "--stage", "-z"])?;
     if !out.status.success() {
         return Err(Error::GitCommandFailed(
             "ls-files --sparse --stage failed".into(),
@@ -982,7 +1032,8 @@ fn begin_first_publication(
 ) -> Result<String, Error> {
     // Cleanliness check for begin
 
-    validate_begin_cleanliness(git, auth)?;
+    let tracked_gov = tracked_governance_paths(git, &git_object_format_of(git)?)?;
+    validate_begin_cleanliness(git, auth, &tracked_gov)?;
 
     // Capture HEAD and branch
     let baseline_head = current_head.to_string();
@@ -1037,7 +1088,8 @@ fn handle_existing_record(
     validate_impl_record_against_auth(&existing, auth)?;
 
     // Validate cleanliness
-    validate_begin_cleanliness(git, auth)?;
+    let tracked_gov = tracked_governance_paths(git, &git_object_format_of(git)?)?;
+    validate_begin_cleanliness(git, auth, &tracked_gov)?;
 
     // Now validate current branch/HEAD vs record
     if existing.baseline_branch != current_branch {
@@ -1089,7 +1141,16 @@ fn records_identical(a: &ImplementationAuthority, b: &ImplementationAuthority) -
         && a.baseline_branch == b.baseline_branch
 }
 
-fn validate_begin_cleanliness(git: &GitRunner, auth: &ValidatedAuthority) -> Result<(), Error> {
+/// `tracked_governance` is the exact set of repository-relative paths whose
+/// first segment is `.mrgs` as proved by Section 6.4 index inspection. The
+/// fixed-governance-path exemption for `??` and ignored-untracked output is
+/// applied only when the path is NOT in this set, proving no tracked index
+/// entry exists for it (contract §6.5).
+fn validate_begin_cleanliness(
+    git: &GitRunner,
+    auth: &ValidatedAuthority,
+    tracked_governance: &[String],
+) -> Result<(), Error> {
     let out = git.run([
         "status",
         "--porcelain=v1",
@@ -1153,7 +1214,7 @@ fn validate_begin_cleanliness(git: &GitRunner, auth: &ValidatedAuthority) -> Res
 
             validate_inventory_path(path_data_str)?;
 
-            if !is_exempt_governance_path(path_data_str, auth) {
+            if !is_exempt_governance_path(path_data_str, auth, tracked_governance) {
                 return Err(Error::GitDirty);
             }
             i += nul + 1;
@@ -1217,7 +1278,7 @@ fn validate_begin_cleanliness(git: &GitRunner, auth: &ValidatedAuthority) -> Res
             .ok_or(Error::GitInventoryInvalid)?;
         let path_data = &stdout2[j..j + nul];
         let path_str = std::str::from_utf8(path_data).map_err(|_| Error::GitInventoryInvalid)?;
-        if !is_exempt_governance_path(path_str, auth) {
+        if !is_exempt_governance_path(path_str, auth, tracked_governance) {
             return Err(Error::GitDirty);
         }
         j += nul + 1;
@@ -1226,7 +1287,11 @@ fn validate_begin_cleanliness(git: &GitRunner, auth: &ValidatedAuthority) -> Res
     Ok(())
 }
 
-fn is_exempt_governance_path(path: &str, _auth: &ValidatedAuthority) -> bool {
+fn is_exempt_governance_path(
+    path: &str,
+    _auth: &ValidatedAuthority,
+    tracked_governance: &[String],
+) -> bool {
     let gov_paths = [
         ".mrgs/accepted-plan.json",
         ".mrgs/state.json",
@@ -1234,9 +1299,9 @@ fn is_exempt_governance_path(path: &str, _auth: &ValidatedAuthority) -> bool {
         ".mrgs/accepted-contract.json",
         ".mrgs/implementation-authority.json",
     ];
-    // Only exempt if not tracked (checked earlier)
-    // and it's one of the exact fixed paths
-    gov_paths.contains(&path)
+    // Only exempt one of the exact fixed paths AND only when Section 6.4
+    // proved that no tracked index entry exists for it (contract §6.5).
+    gov_paths.contains(&path) && !tracked_governance.iter().any(|p| p == path)
 }
 
 fn atomic_first_publish(gov_dir: &Path, record: &ImplementationAuthority) -> Result<(), Error> {
@@ -1389,6 +1454,26 @@ fn rename_noclobber(src: &Path, dst: &Path) -> Result<(), Error> {
         return Err(Error::ImplementationAuthorityConflict);
     }
     Err(Error::PersistenceFailed)
+}
+
+/// Classify the result of a leaf `symlink_metadata` call for Section 12.2
+/// topology inspection. Pure and deterministic: `Ok` yields `Some(metadata)`,
+/// `NotFound` yields `None` (absent), and every other error yields
+/// `FilesystemBoundaryUnsafe`. Permission-denied, invalid topology, I/O, and
+/// race errors are never reinterpreted as absence (Blocker 1).
+fn classify_metadata_result(
+    result: std::io::Result<std::fs::Metadata>,
+) -> Result<Option<std::fs::Metadata>, Error> {
+    match result {
+        Ok(m) => Ok(Some(m)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(Error::FilesystemBoundaryUnsafe),
+    }
+}
+
+/// Classify a changed live leaf for Section 12.2 topology inspection.
+fn classify_live_leaf_metadata(full: &Path) -> Result<Option<std::fs::Metadata>, Error> {
+    classify_metadata_result(std::fs::symlink_metadata(full))
 }
 
 pub fn cmd_implementation_check(repo_arg: &str) -> Result<String, Error> {
@@ -1579,7 +1664,9 @@ pub fn cmd_implementation_check(repo_arg: &str) -> Result<String, Error> {
     }
 
     // Build change inventory
-    let (inventory, raw_entries) = build_change_inventory(&git, &record, &auth, &_objfmt)?;
+    let tracked_gov = tracked_governance_paths(&git, &objfmt)?;
+    let (inventory, raw_entries) =
+        build_change_inventory(&git, &record, &auth, &_objfmt, &tracked_gov)?;
 
     // Validate paths with symlink and filesystem checks
     let mut validated_count = 0u32;
@@ -1598,95 +1685,109 @@ pub fn cmd_implementation_check(repo_arg: &str) -> Result<String, Error> {
             &_objfmt,
         )?;
 
-        // Section 12.2: live path topology - inspect every ancestor component
+        // Section 12.2: live path topology. Classify the live leaf exactly.
         let full = auth.repo.join(path);
-        if let Ok(meta) = std::fs::symlink_metadata(&full) {
-            let mut prefix = String::new();
-            let components: Vec<&str> = path.split('/').collect();
-            for (idx, component) in components.iter().enumerate() {
-                if idx > 0 {
-                    prefix.push('/');
-                }
-                prefix.push_str(component);
-                let comp_full = auth.repo.join(&prefix);
-                // Skip the leaf if it is the full path being inspected
-                if comp_full == full {
-                    continue;
-                }
-                if let Ok(cm) = std::fs::symlink_metadata(&comp_full) {
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::fs::MetadataExt;
-                        if cm.file_attributes() & 0x400 != 0 {
-                            return Err(Error::FilesystemBoundaryUnsafe);
-                        }
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        if cm.file_type().is_symlink() {
-                            return Err(Error::FilesystemBoundaryUnsafe);
-                        }
-                    }
-                }
+        let meta = match classify_live_leaf_metadata(&full)? {
+            Some(m) => m,
+            None => {
+                // Absent/deleted live leaf: perform no live-layer inspection.
+                // An absent changed path is still validated by the git layers
+                // above and the rule set below.
+                auth.rule_set.evaluate(path)?;
+                validated_count += 1;
+                continue;
             }
+        };
 
-            if meta.file_type().is_symlink() {
-                let target_bytes =
-                    std::fs::read_link(&full).map_err(|_| Error::FilesystemBoundaryUnsafe)?;
-                // Target must be strict UTF-8.
-                let target_str = target_bytes
-                    .to_str()
-                    .ok_or(Error::FilesystemBoundaryUnsafe)?;
-                if target_str.is_empty() {
-                    return Err(Error::FilesystemBoundaryUnsafe);
-                }
-                if target_str.starts_with('/') || target_str.starts_with("//") {
-                    return Err(Error::FilesystemBoundaryUnsafe);
-                }
-                if target_str.len() >= 2
-                    && target_str.as_bytes()[0].is_ascii_alphabetic()
-                    && target_str.as_bytes()[1] == b':'
-                {
-                    return Err(Error::FilesystemBoundaryUnsafe);
-                }
-                // Resolve relative to the symlink's repository-relative parent,
-                // not process cwd.
-                let parent = match path.rfind('/') {
-                    Some(pos) => &path[..pos],
-                    None => "",
-                };
-                let mut resolved_components: Vec<&str> = if parent.is_empty() {
-                    Vec::new()
-                } else {
-                    parent.split('/').collect()
-                };
-                for seg in target_str.split('/') {
-                    match seg {
-                        "." => {}
-                        ".." => {
-                            if resolved_components.pop().is_none() {
-                                return Err(Error::FilesystemBoundaryUnsafe);
-                            }
-                        }
-                        "" => return Err(Error::FilesystemBoundaryUnsafe),
-                        other => resolved_components.push(other),
-                    }
-                }
-                let resolved = resolved_components.join("/");
-                if resolved.starts_with("..") || resolved.starts_with('/') {
-                    return Err(Error::FilesystemBoundaryUnsafe);
-                }
-                evaluate_symlink_target(&auth.rule_set, &resolved)?;
-                // For live targets, resolve relative to symlink parent on filesystem.
-                let link_parent = auth.repo.join(parent);
-                let target_path = link_parent.join(target_str);
-                if target_path.exists() {
+        // Blockers 2/3: inspect every ancestor component. Any metadata error,
+        // including NotFound, is fatal because an existing leaf cannot have a
+        // missing ancestor under consistent evidence. Reject Unix symlink
+        // ancestors and any Windows reparse-point ancestor.
+        let mut prefix = String::new();
+        let components: Vec<&str> = path.split('/').collect();
+        for (idx, component) in components.iter().enumerate() {
+            if idx > 0 {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            let comp_full = auth.repo.join(&prefix);
+            // Skip the leaf; it is handled below, not an ancestor.
+            if comp_full == full {
+                continue;
+            }
+            let cm = std::fs::symlink_metadata(&comp_full)
+                .map_err(|_| Error::FilesystemBoundaryUnsafe)?;
+            reject_unsafe_ancestor_metadata(&cm)?;
+        }
+
+        // Blockers 3: a non-symlink Windows reparse-point leaf (junction, etc.)
+        // is rejected before ordinary or allowed-symlink handling. A genuine
+        // symlink leaf is preserved for its required target proof below.
+        if is_reparse_point_not_symlink(&meta) {
+            return Err(Error::FilesystemBoundaryUnsafe);
+        }
+
+        if meta.file_type().is_symlink() {
+            // 1. Read the link without following it; failure is fatal.
+            let target_bytes =
+                std::fs::read_link(&full).map_err(|_| Error::FilesystemBoundaryUnsafe)?;
+            // 2. Require strict UTF-8 and a non-empty target.
+            let target_str = target_bytes
+                .to_str()
+                .ok_or(Error::FilesystemBoundaryUnsafe)?;
+            if target_str.is_empty() {
+                return Err(Error::FilesystemBoundaryUnsafe);
+            }
+            // 3. Lexical target validation (contract §12.1 rules 1-4).
+            validate_symlink_target(&auth.repo, path, target_str)?;
+            // Relative to the symlink's repository-relative parent.
+            let parent = match path.rfind('/') {
+                Some(pos) => &path[..pos],
+                None => "",
+            };
+            // 4. Lexically resolve the target relative to the parent and
+            // reject any lexical escape.
+            let resolved = resolve_lexical_symlink_target(parent, target_str)?;
+            // 5. Separate lexical-target rule evaluation (contract §12.1 rule 8
+            // / §12.3): the lexical resolved path is matched against the rule
+            // set independently of the canonical proof below.
+            evaluate_symlink_target(&auth.rule_set, &resolved)?;
+
+            // 6. Live-layer chain proof (contract §12.1 rule 5): inspect every
+            // existing target prefix and the target leaf via symlink_metadata.
+            // Metadata inspection errors are fatal; a missing component marks
+            // the target broken and stops inspection (broken-target lexical
+            // rules already applied above). Any symlink, junction, or
+            // non-symlink reparse point in the live-layer chain is rejected.
+            let link_parent = auth.repo.join(parent);
+            prove_live_target_no_chain(&link_parent, target_str)?;
+
+            // 7-8. If the resolved live target exists, require a canonical
+            // proof. Canonicalization is performed only after the no-chain
+            // proof; the canonical target must remain inside the canonical
+            // repository and convert without loss to a normalized
+            // repository-relative `/` path, which is then matched
+            // independently against the rule set (contract §12.1 rules 6-8).
+            let target_path = link_parent.join(target_str);
+            match std::fs::symlink_metadata(&target_path) {
+                Ok(_) => {
                     let canonical = std::fs::canonicalize(&target_path)
                         .map_err(|_| Error::FilesystemBoundaryUnsafe)?;
-                    if !canonical.starts_with(&auth.repo) {
-                        return Err(Error::FilesystemBoundaryUnsafe);
-                    }
+                    let repo_relative = canonical_target_to_repo_relative(&auth.repo, &canonical)?;
+                    auth.rule_set
+                        .evaluate(&repo_relative)
+                        .map_err(|e| match e {
+                            Error::ChangeForbidden | Error::ChangeNotAllowed => {
+                                Error::FilesystemBoundaryUnsafe
+                            }
+                            _ => e,
+                        })?;
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Broken target: lexical rules already applied. No
+                    // canonical proof is possible (contract §12.2).
+                }
+                Err(_) => return Err(Error::FilesystemBoundaryUnsafe),
             }
         }
 
@@ -1776,6 +1877,115 @@ fn evaluate_symlink_target(ruleset: &PathRuleSet, target: &str) -> Result<(), Er
         Error::ChangeForbidden | Error::ChangeNotAllowed => Error::FilesystemBoundaryUnsafe,
         _ => e,
     })
+}
+
+/// Lexically resolve a symlink target relative to the symlink's parent
+/// repository-relative path, rejecting any escape (contract §12.1 rules 3-4).
+/// Pure: no filesystem access. The caller must have already validated the raw
+/// target lexically via `validate_symlink_target`.
+fn resolve_lexical_symlink_target(parent: &str, raw_target: &str) -> Result<String, Error> {
+    let mut components: Vec<&str> = if parent.is_empty() {
+        Vec::new()
+    } else {
+        parent.split('/').collect()
+    };
+    for seg in raw_target.split('/') {
+        match seg {
+            "" => return Err(Error::FilesystemBoundaryUnsafe),
+            "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(Error::FilesystemBoundaryUnsafe);
+                }
+            }
+            other => components.push(other),
+        }
+    }
+    let resolved = components.join("/");
+    if resolved.starts_with("..") || resolved.starts_with('/') {
+        return Err(Error::FilesystemBoundaryUnsafe);
+    }
+    Ok(resolved)
+}
+
+/// Inspect the live-layer chain of a resolved symlink target. Every component
+/// prefix that exists is inspected with `symlink_metadata` (errors are fatal),
+/// and any symlink, junction, or non-symlink reparse point rejects the change.
+/// A component that does not exist marks the target broken and stops
+/// inspection (broken-target lexical rules are applied separately by the
+/// caller). Used for an existing live symlink target; never for HEAD or index
+/// targets (those are proven via git object inspection).
+fn prove_live_target_no_chain(link_parent: &Path, target_str: &str) -> Result<(), Error> {
+    let comps: Vec<&str> = target_str.split('/').collect();
+    let mut prefix = String::new();
+    for comp in comps {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(comp);
+        let comp_full = link_parent.join(&prefix);
+        match std::fs::symlink_metadata(&comp_full) {
+            Ok(meta) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if meta.file_attributes() & 0x400 != 0 {
+                        return Err(Error::FilesystemBoundaryUnsafe);
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    if meta.file_type().is_symlink() {
+                        return Err(Error::FilesystemBoundaryUnsafe);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Broken target: stop inspecting the chain.
+                break;
+            }
+            Err(_) => return Err(Error::FilesystemBoundaryUnsafe),
+        }
+    }
+    Ok(())
+}
+
+/// Convert a canonical absolute target path to a normalized repository-relative
+/// `/`-separated path, requiring the canonical target to remain inside the
+/// canonical repository (contract §12.1 rule 7). Any containment or conversion
+/// failure returns `FILESYSTEM_BOUNDARY_UNSAFE`.
+fn canonical_target_to_repo_relative(
+    repo_canonical: &Path,
+    target_canonical: &Path,
+) -> Result<String, Error> {
+    let repo_str = repo_canonical
+        .to_str()
+        .ok_or(Error::FilesystemBoundaryUnsafe)?
+        .replace('\\', "/");
+    let target_str = target_canonical
+        .to_str()
+        .ok_or(Error::FilesystemBoundaryUnsafe)?
+        .replace('\\', "/");
+    if !target_str.starts_with(&repo_str) {
+        return Err(Error::FilesystemBoundaryUnsafe);
+    }
+    let suffix = &target_str[repo_str.len()..];
+    let rel = if let Some(stripped) = suffix.strip_prefix('/') {
+        stripped
+    } else if suffix.is_empty() {
+        return Err(Error::FilesystemBoundaryUnsafe);
+    } else {
+        // `repo_str` was not a directory boundary; reject.
+        return Err(Error::FilesystemBoundaryUnsafe);
+    };
+    if rel.is_empty() {
+        return Err(Error::FilesystemBoundaryUnsafe);
+    }
+    let normalized: String = rel.replace('\\', "/");
+    if normalized.starts_with('/') || normalized.contains("//") {
+        return Err(Error::FilesystemBoundaryUnsafe);
+    }
+    Ok(normalized)
 }
 
 /// Section 12.3: inspect HEAD and index symlink layers for a changed path.
@@ -2435,6 +2645,7 @@ fn build_change_inventory(
     record: &ImplementationAuthority,
     auth: &ValidatedAuthority,
     objfmt: &str,
+    tracked_governance: &[String],
 ) -> Result<(BTreeSet<String>, Vec<RawDiffEntry>), Error> {
     let mut paths = BTreeSet::new();
 
@@ -2504,7 +2715,7 @@ fn build_change_inventory(
                 // Do not exempt a `??` governance path before complete path
                 // validation (BLOCKER 6).
                 validate_inventory_path(path_str)?;
-                if is_exempt_governance_path(path_str, auth) {
+                if is_exempt_governance_path(path_str, auth, tracked_governance) {
                     i += nul + 1;
                     continue;
                 }
@@ -2580,7 +2791,7 @@ fn build_change_inventory(
                 std::str::from_utf8(path_data).map_err(|_| Error::GitInventoryInvalid)?;
             // Validate ignored-inventory path before insertion
             validate_inventory_path(path_str)?;
-            if !is_exempt_governance_path(path_str, auth) {
+            if !is_exempt_governance_path(path_str, auth, tracked_governance) {
                 paths.insert(path_str.to_string());
             }
             i += nul + 1;
@@ -2978,5 +3189,420 @@ mod part1_tests {
     fn path_prefixes_yields_increasing() {
         assert_eq!(path_prefixes("a/b/c"), vec!["a", "a/b", "a/b/c"]);
         assert_eq!(path_prefixes("a"), vec!["a"]);
+    }
+}
+
+#[cfg(test)]
+mod p2a_tests {
+    use super::*;
+
+    // P2-A: the begin-cleanliness governance exemption is gated on the Section
+    // 6.4 proof that no tracked index entry exists for the path. A path that IS
+    // tracked must never be exempted from `??`/ignored-untracked even when it is
+    // one of the exact fixed governance filenames.
+    #[test]
+    fn exemption_rejected_when_path_is_tracked() {
+        let auth = ValidatedAuthority {
+            repo: PathBuf::from("/repo"),
+            gov_dir: PathBuf::from("/repo/.mrgs"),
+            accepted_plan_sha256: String::new(),
+            active_phase: String::new(),
+            contract_id: String::new(),
+            final_revision: 1,
+            final_source_path: String::new(),
+            final_sha256: String::new(),
+            final_content: String::new(),
+            rule_set: PathRuleSet {
+                allowed: vec![],
+                forbidden: vec![],
+            },
+            lifecycle: "ACCEPTED",
+        };
+        // `.mrgs/state.json` reported as an untracked `??` path, but Section 6.4
+        // proved a tracked index entry exists for it -> not exempt.
+        let tracked = vec![".mrgs/state.json".to_string()];
+        assert!(!is_exempt_governance_path(
+            ".mrgs/state.json",
+            &auth,
+            &tracked
+        ));
+        // A different fixed governance path with no tracked entry IS exempt.
+        let none_tracked: Vec<String> = vec![];
+        assert!(is_exempt_governance_path(
+            ".mrgs/state.json",
+            &auth,
+            &none_tracked
+        ));
+        // A non-governance path is never exempt regardless of tracking.
+        assert!(!is_exempt_governance_path(
+            "src/main.rs",
+            &auth,
+            &none_tracked
+        ));
+        // A tracked `.MRGS/state.json` (case alias) is gated using the exact
+        // path git reports: the exemption for `.mrgs/state.json` is unaffected
+        // only because git reports the alias under its own bytes; the alias
+        // path itself would be gated if it were the one being exempted.
+        let tracked_alias = vec![".MRGS/state.json".to_string()];
+        assert!(!is_exempt_governance_path(
+            ".MRGS/state.json",
+            &auth,
+            &tracked_alias
+        ));
+        // When git reports `.mrgs/state.json` exactly and it is tracked, it is
+        // gated precisely (exact bytes, no normalization).
+        let tracked_exact = vec![".mrgs/state.json".to_string()];
+        assert!(!is_exempt_governance_path(
+            ".mrgs/state.json",
+            &auth,
+            &tracked_exact
+        ));
+    }
+
+    // P2-A: exact fixed-governance exemption set is exactly the five contract
+    // paths and no other `.mrgs` path (unknown/temporary/child paths are not
+    // exempt even when untracked).
+    #[test]
+    fn exemption_only_exact_fixed_paths() {
+        let auth = ValidatedAuthority {
+            repo: PathBuf::from("/repo"),
+            gov_dir: PathBuf::from("/repo/.mrgs"),
+            accepted_plan_sha256: String::new(),
+            active_phase: String::new(),
+            contract_id: String::new(),
+            final_revision: 1,
+            final_source_path: String::new(),
+            final_sha256: String::new(),
+            final_content: String::new(),
+            rule_set: PathRuleSet {
+                allowed: vec![],
+                forbidden: vec![],
+            },
+            lifecycle: "ACCEPTED",
+        };
+        let none: Vec<String> = vec![];
+        for p in [
+            ".mrgs/accepted-plan.json",
+            ".mrgs/state.json",
+            ".mrgs/contract-draft.json",
+            ".mrgs/accepted-contract.json",
+            ".mrgs/implementation-authority.json",
+        ] {
+            assert!(is_exempt_governance_path(p, &auth, &none));
+        }
+        // Unknown / temporary / child `.mrgs` paths are never exempt.
+        for p in [
+            ".mrgs/extra.json",
+            ".mrgs/.tmp_x.tmp",
+            ".mrgs/sub/draft.json",
+            "src/main.rs",
+        ] {
+            assert!(!is_exempt_governance_path(p, &auth, &none));
+        }
+    }
+
+    // P2-A: a tracked `.mrgs` index entry is rejected by the same stage parser
+    // that `tracked_governance_paths` consumes, proving Section 6.4 catches a
+    // tracked governance path before any exemption is even considered. We
+    // exercise the parser directly rather than spawning git.
+    #[test]
+    fn tracked_governance_index_entry_rejected_by_parser() {
+        let oid = "a".repeat(40);
+        // A tracked `.mrgs/state.json` (stage 0, ordinary file) must be rejected
+        // as GIT_INVENTORY_INVALID by the stage parser itself.
+        let rec = format!("100644 {oid} 0\t.mrgs/state.json\0");
+        assert!(matches!(
+            parse_index_stage_record(rec.as_bytes(), "sha1"),
+            Err(Error::GitInventoryInvalid)
+        ));
+        // A tracked `.MRGS/state.json` (case alias) is likewise rejected.
+        let rec2 = format!("100644 {oid} 0\t.MRGS/state.json\0");
+        assert!(matches!(
+            parse_index_stage_record(rec2.as_bytes(), "sha1"),
+            Err(Error::GitInventoryInvalid)
+        ));
+        // A tracked ordinary `src/main.rs` parses fine (not a `.mrgs` segment).
+        // (No trailing NUL: the production parser receives a single record
+        // slice already split on the `-z` separator.)
+        let rec3 = format!("100644 {oid} 0\tsrc/main.rs");
+        assert!(parse_index_stage_record(rec3.as_bytes(), "sha1").is_ok());
+    }
+
+    // P2-A: `evaluate_symlink_target` maps ordinary changed-path categories
+    // (CHANGE_FORBIDDEN / CHANGE_NOT_ALLOWED) to FILESYSTEM_BOUNDARY_UNSAFE for a
+    // symlink target, never leaking the ordinary changed-path category.
+    #[test]
+    fn symlink_target_scope_maps_to_boundary_unsafe() {
+        let ruleset = PathRuleSet {
+            allowed: vec!["allowed/file".to_string()],
+            forbidden: vec!["secret/file".to_string()],
+        };
+        // Forbidden target -> FILESYSTEM_BOUNDARY_UNSAFE.
+        assert!(matches!(
+            evaluate_symlink_target(&ruleset, "secret/file"),
+            Err(Error::FilesystemBoundaryUnsafe)
+        ));
+        // No-allowed target -> FILESYSTEM_BOUNDARY_UNSAFE.
+        assert!(matches!(
+            evaluate_symlink_target(&ruleset, "other/file"),
+            Err(Error::FilesystemBoundaryUnsafe)
+        ));
+        // Allowed target -> Ok.
+        assert!(evaluate_symlink_target(&ruleset, "allowed/file").is_ok());
+    }
+
+    // P2-A: `validate_symlink_target` rejects a target that lexically escapes
+    // the repository and accepts a contained relative target.
+    #[test]
+    fn symlink_target_lexical_escape_rejected() {
+        assert!(validate_symlink_target(Path::new("link"), "link", "../escape").is_err());
+        assert!(validate_symlink_target(Path::new("a/link"), "a/link", "../../x").is_err());
+        assert!(validate_symlink_target(Path::new("link"), "link", "sub/ok").is_ok());
+    }
+
+    // P2-A (Blocker 1): `resolve_lexical_symlink_target` produces the exact
+    // repository-relative path the live canonical proof relies on, and rejects
+    // any lexical escape.
+    #[test]
+    fn resolve_lexical_symlink_target_ok_and_escape() {
+        // Root-level link -> relative target stays at top.
+        assert_eq!(
+            resolve_lexical_symlink_target("", "sub/target").unwrap(),
+            "sub/target"
+        );
+        // Nested link resolves relative to its parent.
+        assert_eq!(
+            resolve_lexical_symlink_target("a/b", "c/d").unwrap(),
+            "a/b/c/d"
+        );
+        // "." segments collapse.
+        assert_eq!(
+            resolve_lexical_symlink_target("a/b", "./c").unwrap(),
+            "a/b/c"
+        );
+        // ".." can pop within the repository but not escape it.
+        assert_eq!(
+            resolve_lexical_symlink_target("a/b", "../c").unwrap(),
+            "a/c"
+        );
+        assert_eq!(
+            resolve_lexical_symlink_target("a/b", "../../c").unwrap(),
+            "c"
+        );
+        // Escape above the repository root is rejected.
+        assert!(resolve_lexical_symlink_target("a", "../../c").is_err());
+        // Resolving exactly to the repository root is lexically allowed (the
+        // canonical proof rejects an empty repository-relative target).
+        assert_eq!(resolve_lexical_symlink_target("a/b", "../..").unwrap(), "");
+        // Empty and absolute-ish segments rejected.
+        assert!(resolve_lexical_symlink_target("a", "b//c").is_err());
+        assert!(resolve_lexical_symlink_target("a", "/abs").is_err());
+        // Absolute targets (leading slash) are rejected.
+        assert!(resolve_lexical_symlink_target("a/b", "/etc/passwd").is_err());
+    }
+
+    // P2-A (Blocker 1): `canonical_target_to_repo_relative` requires the
+    // canonical target to remain inside the canonical repository and converts
+    // without loss to a normalized `/`-separated repository-relative path.
+    #[test]
+    fn canonical_target_to_repo_relative_normalizes() {
+        let repo = Path::new("/repo");
+        // Inside the repository.
+        let t = Path::new("/repo/sub/dir/file");
+        assert_eq!(
+            canonical_target_to_repo_relative(repo, t).unwrap(),
+            "sub/dir/file"
+        );
+        // Direct child.
+        let t2 = Path::new("/repo/file");
+        assert_eq!(canonical_target_to_repo_relative(repo, t2).unwrap(), "file");
+        // Outside the repository -> rejected.
+        assert!(canonical_target_to_repo_relative(repo, Path::new("/other/x")).is_err());
+        // Sibling prefix (not a directory boundary) -> rejected.
+        assert!(canonical_target_to_repo_relative(repo, Path::new("/repoX/x")).is_err());
+        // Equal to the repository root -> rejected (empty relative).
+        assert!(canonical_target_to_repo_relative(repo, Path::new("/repo")).is_err());
+        // Non-UTF-8 / invalid -> rejected.
+        let bad = Path::new("/repo");
+        // Construct a path whose components are valid but suffix is a stray
+        // absolute root marker.
+        assert!(canonical_target_to_repo_relative(bad, Path::new("/repo/")).is_err());
+    }
+
+    // P2-A (Blocker 1): the live canonical proof requires the canonical target
+    // to match the rule set independently. Here we exercise the helper chain on
+    // a real temporary tree: a live symlink whose existing target resolves
+    // inside the repo is accepted when allowed and rejected when forbidden.
+    #[test]
+    fn live_symlink_canonical_proof_real_fs() {
+        let tmp = std::env::temp_dir().join(format!("mrgs_p2a_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("allowed")).unwrap();
+        std::fs::create_dir_all(tmp.join("secret")).unwrap();
+        std::fs::write(tmp.join("allowed/target.txt"), b"ok").unwrap();
+        std::fs::write(tmp.join("secret/target.txt"), b"no").unwrap();
+
+        // Allowed target. The symlink points at allowed/target.txt (exists),
+        // so the canonical proof path is taken.
+        let allowed_rules = PathRuleSet {
+            allowed: vec!["allowed/target.txt".to_string()],
+            forbidden: vec![], // explicit allow covers it; forbidden blank
+        };
+        // Use a relaxed ruleset so lexical eval passes; containment is what we
+        // verify. Build a symlink and run the production live inspection helpers.
+        let link = tmp.join("link_a");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("allowed/target.txt", &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file("allowed/target.txt", &link).unwrap();
+
+        let repo = std::fs::canonicalize(&tmp).unwrap();
+        let link_parent = repo.join("");
+        // `prove_live_target_no_chain` must accept a plain-file chain.
+        prove_live_target_no_chain(&link_parent, "allowed/target.txt").unwrap();
+        // The canonical target converts to the expected repository-relative path.
+        let target_path = link_parent.join("allowed/target.txt");
+        let canon = std::fs::canonicalize(&target_path).unwrap();
+        let rel = canonical_target_to_repo_relative(&repo, &canon).unwrap();
+        // Rule-set evaluation against the canonical repo-relative path.
+        assert!(allowed_rules.evaluate(&rel).is_ok());
+
+        // Forbidden target: lexical match alone must also reject at the separate
+        // lexical evaluation stage.
+        let forbidden_rules = PathRuleSet {
+            allowed: vec!["allowed/".to_string()],
+            forbidden: vec!["secret/target.txt".to_string()],
+        };
+        // A lexical target under `secret/` is forbidden-first rejected.
+        assert!(matches!(
+            forbidden_rules.evaluate("secret/target.txt"),
+            Err(Error::ChangeForbidden)
+        ));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // P2-A (Blocker 1): `classify_metadata_result` classifies a leaf exactly.
+    // Only `NotFound` yields absence; every other error kind yields
+    // FILESYSTEM_BOUNDARY_UNSAFE (never reinterpreted as absence).
+    #[test]
+    fn classify_metadata_result_absent_only_for_notfound() {
+        use std::io::{Error as IoError, ErrorKind};
+        // Existing metadata -> Some.
+        let tmp = std::env::temp_dir().join(format!("mrgs_p2a_cls_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let meta = std::fs::symlink_metadata(&tmp).unwrap();
+        assert!(classify_metadata_result(Ok(meta)).unwrap().is_some());
+        // Missing leaf -> None (absent), exactly NotFound.
+        let missing = tmp.join("does_not_exist_xyz");
+        let r = classify_metadata_result(std::fs::symlink_metadata(&missing));
+        assert!(r.unwrap().is_none());
+        // Other error kinds -> FILESYSTEM_BOUNDARY_UNSAFE.
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+            ErrorKind::Interrupted,
+            ErrorKind::UnexpectedEof,
+        ] {
+            let err = classify_metadata_result(Err(IoError::new(kind, "simulated")));
+            assert!(matches!(err, Err(Error::FilesystemBoundaryUnsafe)));
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // P2-A (Blocker 1/2): `classify_live_leaf_metadata` on a real tree yields
+    // Some for an existing ordinary leaf and None for an absent leaf.
+    #[test]
+    fn classify_live_leaf_metadata_real_fs() {
+        let tmp = std::env::temp_dir().join(format!("mrgs_p2a_leaf_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        std::fs::write(tmp.join("sub/file.txt"), b"x").unwrap();
+        // Existing ordinary leaf -> Some.
+        assert!(classify_live_leaf_metadata(&tmp.join("sub/file.txt"))
+            .unwrap()
+            .is_some());
+        // Absent leaf -> None.
+        assert!(classify_live_leaf_metadata(&tmp.join("sub/missing.txt"))
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // P2-A (Blocker 3): `is_reparse_point_not_symlink` rejects a Windows
+    // junction leaf via a real `mklink /J` fixture when safely available, and
+    // never rejects a genuine symlink. Non-Windows: the helper is always false.
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_leaf_rejected_real_fixture() {
+        let tmp = std::env::temp_dir().join(format!("mrgs_p2a_junc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("target")).unwrap();
+        std::fs::create_dir_all(tmp.join("link_parent")).unwrap();
+        // Create a real junction `link_parent/j` -> `target`.
+        let junc = tmp.join("link_parent/j");
+        let mk = std::process::Command::new("cmd")
+            .args([
+                "/c",
+                "mklink",
+                "/J",
+                &junc.to_string_lossy(),
+                &tmp.join("target").to_string_lossy(),
+            ])
+            .output();
+        if mk.is_err() || !mk.unwrap().status.success() {
+            // Fixture creation not safely available in this environment.
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+        let meta = std::fs::symlink_metadata(&junc).unwrap();
+        assert!(is_reparse_point_not_symlink(&meta));
+        assert!(matches!(
+            reject_unsafe_ancestor_metadata(&meta),
+            Err(Error::FilesystemBoundaryUnsafe)
+        ));
+        // The reparse-only helper does not flag a genuine symlink; the
+        // cross-platform ancestor helper still rejects it.
+        let sl = tmp.join("link_parent/s");
+        if let Err(err) = std::os::windows::fs::symlink_file("target", &sl) {
+            eprintln!("WINDOWS_FIXTURE_LIMITATION: symlink creation failed: {err}");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+        let sl_meta = std::fs::symlink_metadata(&sl).unwrap();
+        assert!(!is_reparse_point_not_symlink(&sl_meta));
+        assert!(matches!(
+            reject_unsafe_ancestor_metadata(&sl_meta),
+            Err(Error::FilesystemBoundaryUnsafe)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn ancestor_helper_rejects_symlink_and_accepts_ordinary_directory() {
+        let tmp = std::env::temp_dir().join(format!("mrgs_p2a_ancestor_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("target")).unwrap();
+        let ordinary = std::fs::symlink_metadata(&tmp).unwrap();
+        assert!(reject_unsafe_ancestor_metadata(&ordinary).is_ok());
+
+        let link = tmp.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("target", &link).unwrap();
+        #[cfg(windows)]
+        if let Err(err) = std::os::windows::fs::symlink_dir("target", &link) {
+            eprintln!("WINDOWS_FIXTURE_LIMITATION: symlink creation failed: {err}");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+        let link_meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(link_meta.file_type().is_symlink());
+        assert!(matches!(
+            reject_unsafe_ancestor_metadata(&link_meta),
+            Err(Error::FilesystemBoundaryUnsafe)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
