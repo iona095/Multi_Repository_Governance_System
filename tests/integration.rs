@@ -5113,17 +5113,37 @@ fn test_implementation_begin_accepted_lifecycle() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.starts_with("IMPLEMENTATION_BOUND"), "stdout: {}", out);
-    assert!(out.contains("test-contract-v1"), "stdout: {}", out);
-    assert!(out.contains(&final_rev.to_string()), "stdout: {}", out);
-    assert!(out.contains(&final_sha), "stdout: {}", out);
+    assert_phase4_begin_exact(&output, &repo);
     assert!(repo
         .join(".mrgs")
         .join("implementation-authority.json")
         .exists());
     assert_no_temp_files(&repo);
+}
+
+fn assert_phase4_begin_exact(output: &std::process::Output, repo: &Path) {
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={:?} stderr={:?}",
+        output.stdout,
+        output.stderr
+    );
+    assert!(output.stderr.is_empty());
+    let ledger = read_json(repo, "accepted-contract.json");
+    let revs = ledger["revisions"].as_array().unwrap();
+    let final_entry = revs.last().unwrap();
+    let record = read_json(repo, "implementation-authority.json");
+    let expected = format!(
+        "IMPLEMENTATION_BOUND {} {} {} {}",
+        ledger["contract_id"].as_str().unwrap(),
+        final_entry["revision"].as_u64().unwrap(),
+        final_entry["sha256"].as_str().unwrap(),
+        record["baseline_head"].as_str().unwrap(),
+    );
+    let mut expected_stdout = expected.into_bytes();
+    expected_stdout.extend_from_slice(phase4_newline());
+    assert_eq!(output.stdout, expected_stdout);
 }
 
 // 2. REVISION_DRAFT lifecycle
@@ -5141,9 +5161,7 @@ fn test_implementation_begin_revision_draft_lifecycle() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     assert_eq!(final_rev, 1);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.starts_with("IMPLEMENTATION_BOUND"), "stdout: {}", out);
+    assert_phase4_begin_exact(&output, &repo);
     assert_no_temp_files(&repo);
 }
 
@@ -5158,10 +5176,7 @@ fn test_implementation_check_after_begin() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.starts_with("IMPLEMENTATION_OK"), "stdout: {}", out);
-    assert!(out.contains("0"), "expected 0 changed paths: {}", out);
+    assert_phase4_success_exact(&output, &repo, 0);
     assert_no_temp_files(&repo);
 }
 
@@ -5175,10 +5190,10 @@ fn test_implementation_begin_idempotent() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let first = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&first);
+    assert_phase4_begin_exact(&first, &repo);
     let second = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&second);
-    assert_eq!(stdout_string(&first), stdout_string(&second));
+    assert_phase4_begin_exact(&second, &repo);
+    assert_eq!(first.stdout, second.stdout);
     assert_no_temp_files(&repo);
 }
 
@@ -5214,10 +5229,7 @@ fn test_implementation_check_with_changed_file_in_allowed_scope() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.starts_with("IMPLEMENTATION_OK"), "stdout: {}", out);
-    assert!(out.contains("1"), "expected 1 changed path: {}", out);
+    assert_phase4_success_exact(&output, &repo, 1);
     assert_no_temp_files(&repo);
 }
 
@@ -5252,12 +5264,7 @@ fn test_implementation_check_with_changed_file_outside_allowed() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CHANGE_NOT_ALLOWED"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
     assert_no_temp_files(&repo);
 }
 
@@ -5269,12 +5276,7 @@ fn test_implementation_begin_draft_lifecycle_rejected() {
     let sha = draft["sha256"].as_str().unwrap().to_string();
     let rev = draft["revision"].as_u64().unwrap() as u32;
     let output = run_implementation_begin(&repo, rev, &sha);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CONTRACT_NOT_ACCEPTED"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CONTRACT_NOT_ACCEPTED");
     assert_no_temp_files(&repo);
 }
 
@@ -5287,12 +5289,7 @@ fn test_implementation_begin_wrong_revision() {
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let output = run_implementation_begin(&repo, 99, &sha);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("REQUESTED_REVISION_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "REQUESTED_REVISION_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -5306,12 +5303,7 @@ fn test_implementation_begin_wrong_sha() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
     let output = run_implementation_begin(&repo, rev, wrong_sha);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("REQUESTED_SHA_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "REQUESTED_SHA_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -5324,12 +5316,7 @@ fn test_implementation_check_without_begin() {
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_MISSING"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_MISSING");
     assert_no_temp_files(&repo);
 }
 
@@ -5344,9 +5331,7 @@ fn test_implementation_begin_dirty_repo() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     std::fs::write(repo.join("uncommitted.txt"), b"dirty").unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    let err = stderr_string(&output);
-    assert_eq!(err, "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     assert_no_temp_files(&repo);
 }
 
@@ -5366,12 +5351,7 @@ fn test_implementation_check_stale_after_plan_change() {
         serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
     write_json(&repo, "implementation-authority.json", &impl_auth);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -5391,9 +5371,7 @@ fn test_implementation_begin_after_new_draft_still_works() {
     assert_eq!(final_rev, 1);
     assert_eq!(final_sha, sha1);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.starts_with("IMPLEMENTATION_BOUND"), "stdout: {}", out);
+    assert_phase4_begin_exact(&output, &repo);
     assert_no_temp_files(&repo);
 }
 
@@ -5445,12 +5423,7 @@ fn test_implementation_check_forbidden_path() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CHANGE_FORBIDDEN"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CHANGE_FORBIDDEN");
     assert_no_temp_files(&repo);
 }
 
@@ -5464,20 +5437,7 @@ fn test_implementation_begin_output_format() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    let parts: Vec<&str> = out.split_whitespace().collect();
-    assert_eq!(parts.len(), 5, "expected 5 fields: {}", out);
-    assert_eq!(parts[0], "IMPLEMENTATION_BOUND");
-    assert_eq!(parts[1], "test-contract-v1");
-    assert_eq!(parts[2], final_rev.to_string());
-    assert_eq!(parts[3], final_sha);
-    assert_eq!(
-        parts[4].len(),
-        40,
-        "baseline head should be 40-char hex: {}",
-        parts[4]
-    );
+    assert_phase4_begin_exact(&output, &repo);
     assert_no_temp_files(&repo);
 }
 
@@ -5492,18 +5452,7 @@ fn test_implementation_check_output_format() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    let parts: Vec<&str> = out.split_whitespace().collect();
-    assert_eq!(parts.len(), 5, "expected 5 fields: {}", out);
-    assert_eq!(parts[0], "IMPLEMENTATION_OK");
-    assert_eq!(parts[1], "test-contract-v1");
-    assert_eq!(parts[2], final_rev.to_string());
-    assert_eq!(parts[3], final_sha);
-    let changed_count: u32 = parts[4]
-        .parse()
-        .expect("changed path count must be a number");
-    assert_eq!(changed_count, 0);
+    assert_phase4_success_exact(&output, &repo, 0);
     assert_no_temp_files(&repo);
 }
 
@@ -5569,12 +5518,7 @@ fn test_impl_record_unsupported_schema() {
     record["schema_version"] = serde_json::json!(2);
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5592,12 +5536,7 @@ fn test_impl_record_unknown_field_rejected() {
     record["unknown_field"] = serde_json::json!("should_fail");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5615,12 +5554,7 @@ fn test_impl_record_missing_field_rejected() {
     record.as_object_mut().unwrap().remove("contract_id");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5637,12 +5571,7 @@ fn test_impl_record_malformed_json_rejected() {
     let path = repo.join(".mrgs").join("implementation-authority.json");
     std::fs::write(&path, b"not valid json {").unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5662,12 +5591,7 @@ fn test_impl_record_content_hash_mismatch() {
         serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5685,12 +5609,7 @@ fn test_impl_record_contract_id_mismatch() {
     record["contract_id"] = serde_json::json!("different-contract");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5708,12 +5627,7 @@ fn test_impl_record_phase_id_mismatch() {
     record["phase_id"] = serde_json::json!("wrong-phase");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5732,12 +5646,7 @@ fn test_impl_record_plan_sha_mismatch() {
         serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -5755,12 +5664,7 @@ fn test_impl_record_revision_mismatch() {
     record["contract_revision"] = serde_json::json!(99);
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -5778,12 +5682,7 @@ fn test_impl_record_source_path_mismatch() {
     record["contract_source_path"] = serde_json::json!("other/path.toml");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -5802,12 +5701,7 @@ fn test_impl_record_contract_sha_mismatch() {
         serde_json::json!("1111111111111111111111111111111111111111111111111111111111111111");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5825,12 +5719,7 @@ fn test_impl_record_git_object_format_mismatch() {
     record["git_object_format"] = serde_json::json!("sha256");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -5845,12 +5734,7 @@ fn test_impl_begin_uppercase_sha_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let upper_sha = final_sha.to_uppercase();
     let output = run_implementation_begin_str(&repo, &final_rev.to_string(), &upper_sha);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("INVALID_ARGUMENT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -5859,12 +5743,7 @@ fn test_impl_begin_uppercase_sha_rejected() {
 fn test_impl_begin_sha_too_short() {
     let (_dir, repo) = setup_implementation_basic();
     let output = run_implementation_begin_str(&repo, "1", "abc123");
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("INVALID_ARGUMENT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -5877,12 +5756,7 @@ fn test_impl_begin_sha_non_hex() {
         "1",
         "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
     );
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("INVALID_ARGUMENT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -5939,12 +5813,7 @@ fn test_impl_begin_rejects_descendant_head() {
     std::fs::write(repo.join("new_file.rs"), b"fn new() {}").unwrap();
     commit_file(&repo, "new_file.rs");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_CONFLICT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_CONFLICT");
     assert_no_temp_files(&repo);
 }
 
@@ -5960,12 +5829,7 @@ fn test_impl_begin_different_binding_rejected() {
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
     let output = run_implementation_begin(&repo, final_rev, wrong_sha);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("REQUESTED_SHA_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "REQUESTED_SHA_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -5988,12 +5852,7 @@ fn test_impl_begin_different_branch_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_CONFLICT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_CONFLICT");
     assert_no_temp_files(&repo);
 }
 
@@ -6010,8 +5869,7 @@ fn test_impl_begin_unstaged_modification() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     std::fs::write(repo.join("README.md"), b"modified").unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     assert_no_temp_files(&repo);
 }
 
@@ -6033,8 +5891,7 @@ fn test_impl_begin_staged_change() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     assert_no_temp_files(&repo);
 }
 
@@ -6049,8 +5906,7 @@ fn test_impl_begin_untracked_file_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     std::fs::write(repo.join("untracked.txt"), b"untracked").unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     assert_no_temp_files(&repo);
 }
 
@@ -6067,8 +5923,7 @@ fn test_impl_begin_ignored_file_rejected() {
     commit_file(&repo, ".gitignore");
     std::fs::write(repo.join("build.log"), b"ignored content").unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     assert_no_temp_files(&repo);
 }
 
@@ -6083,8 +5938,7 @@ fn test_impl_begin_tracked_deletion() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     std::fs::remove_file(repo.join("README.md")).unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     assert_no_temp_files(&repo);
 }
 
@@ -6107,8 +5961,7 @@ fn test_impl_begin_tracked_mrgs_in_status() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6188,8 +6041,7 @@ fn test_impl_begin_detached_head() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DETACHED_HEAD");
+    assert_phase4_failure_exact(&output, "GIT_DETACHED_HEAD");
     assert_no_temp_files(&repo);
 }
 
@@ -6223,8 +6075,7 @@ fn test_impl_check_detached_head() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DETACHED_HEAD");
+    assert_phase4_failure_exact(&output, "GIT_DETACHED_HEAD");
     assert_no_temp_files(&repo);
 }
 
@@ -6239,11 +6090,7 @@ fn test_impl_begin_non_git_repo() {
         "1",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    assert_eq!(
-        stderr_string(&output),
-        "error: GOVERNANCE_AUTHORITY_INVALID"
-    );
+    assert_phase4_failure_exact(&output, "GOVERNANCE_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6259,11 +6106,7 @@ fn test_impl_begin_subdirectory_rejected() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let output = run_implementation_begin(&subdir, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(
-        stderr_string(&output),
-        "error: GOVERNANCE_AUTHORITY_INVALID"
-    );
+    assert_phase4_failure_exact(&output, "GOVERNANCE_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6281,12 +6124,7 @@ fn test_impl_check_baseline_commit_missing() {
     record["baseline_head"] = serde_json::json!("0000000000000000000000000000000000000000");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("BASELINE_COMMIT_MISSING"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "BASELINE_COMMIT_MISSING");
     assert_no_temp_files(&repo);
 }
 
@@ -6309,12 +6147,7 @@ fn test_impl_check_promisor_all_objects_local() {
         .output()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    assert!(
-        stdout_string(&output).contains("IMPLEMENTATION_OK"),
-        "stdout: {}",
-        stdout_string(&output)
-    );
+    assert_phase4_success_exact(&output, &repo, 0);
     assert_no_temp_files(&repo);
 }
 
@@ -6341,8 +6174,7 @@ fn test_impl_check_promisor_missing_promised_commit() {
     record["baseline_head"] = serde_json::json!("0000000000000000000000000000000000000000");
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_COMMAND_FAILED");
+    assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
     assert_no_temp_files(&repo);
 }
 
@@ -6438,8 +6270,7 @@ fn test_impl_check_baseline_not_ancestor() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: BASELINE_HISTORY_CHANGED");
+    assert_phase4_failure_exact(&output, "BASELINE_HISTORY_CHANGED");
     assert_no_temp_files(&repo);
 }
 
@@ -6462,8 +6293,7 @@ fn test_impl_check_branch_changed_same_commit() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: BASELINE_BRANCH_CHANGED");
+    assert_phase4_failure_exact(&output, "BASELINE_BRANCH_CHANGED");
     assert_no_temp_files(&repo);
 }
 
@@ -6478,12 +6308,7 @@ fn test_impl_begin_missing_mrgs() {
         "1",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("GOVERNANCE_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "GOVERNANCE_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6500,8 +6325,7 @@ fn test_impl_begin_merge_head_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     create_git_marker(&repo, "MERGE_HEAD");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_OPERATION_IN_PROGRESS");
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
     assert_no_temp_files(&repo);
 }
 
@@ -6516,8 +6340,7 @@ fn test_impl_begin_cherry_pick_head_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     create_git_marker(&repo, "CHERRY_PICK_HEAD");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_OPERATION_IN_PROGRESS");
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
     assert_no_temp_files(&repo);
 }
 
@@ -6532,8 +6355,7 @@ fn test_impl_begin_revert_head_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     create_git_marker(&repo, "REVERT_HEAD");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_OPERATION_IN_PROGRESS");
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
     assert_no_temp_files(&repo);
 }
 
@@ -6548,8 +6370,7 @@ fn test_impl_begin_bisect_log_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     create_git_marker(&repo, "BISECT_LOG");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_OPERATION_IN_PROGRESS");
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
     assert_no_temp_files(&repo);
 }
 
@@ -6564,8 +6385,7 @@ fn test_impl_begin_bisect_start_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     create_git_marker(&repo, "BISECT_START");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_OPERATION_IN_PROGRESS");
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
     assert_no_temp_files(&repo);
 }
 
@@ -6580,8 +6400,7 @@ fn test_impl_begin_rebase_apply_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     create_git_marker(&repo, "rebase-apply/applying");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_OPERATION_IN_PROGRESS");
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
     assert_no_temp_files(&repo);
 }
 
@@ -6596,8 +6415,7 @@ fn test_impl_begin_sequencer_rejected() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     create_git_marker(&repo, "sequencer/todo");
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_OPERATION_IN_PROGRESS");
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
     assert_no_temp_files(&repo);
 }
 
@@ -6743,8 +6561,7 @@ fn test_impl_begin_submodule_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_SUBMODULE_UNSUPPORTED");
+    assert_phase4_failure_exact(&output, "GIT_SUBMODULE_UNSUPPORTED");
     assert_no_temp_files(&repo);
 }
 
@@ -6768,8 +6585,7 @@ fn test_impl_begin_sparse_checkout_true() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6791,8 +6607,7 @@ fn test_impl_begin_index_sparse_true() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6814,8 +6629,7 @@ fn test_impl_begin_assume_unchanged_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6837,8 +6651,7 @@ fn test_impl_begin_skip_worktree_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6861,8 +6674,7 @@ fn test_impl_check_sparse_checkout_true() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6885,8 +6697,7 @@ fn test_impl_check_assume_unchanged_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6909,8 +6720,7 @@ fn test_impl_check_skip_worktree_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6934,8 +6744,7 @@ fn test_impl_begin_tracked_accepted_plan_rejected() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6957,8 +6766,7 @@ fn test_impl_begin_tracked_state_rejected() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -6980,8 +6788,7 @@ fn test_impl_begin_tracked_contract_draft_rejected() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7003,8 +6810,7 @@ fn test_impl_begin_tracked_accepted_contract_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7027,8 +6833,7 @@ fn test_impl_begin_tracked_impl_authority_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7051,8 +6856,7 @@ fn test_impl_begin_tracked_extra_mrgs_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7068,8 +6872,7 @@ fn test_impl_begin_temp_file_in_mrgs_not_exempt() {
     let tmp_file = repo.join(".mrgs").join("mrgs_tmp_12345_67890.tmp");
     std::fs::write(&tmp_file, b"temp").unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     let _ = std::fs::remove_file(&tmp_file);
 }
 
@@ -7093,8 +6896,7 @@ fn test_impl_begin_mrgs_case_alias_in_index() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7134,8 +6936,7 @@ fn test_impl_check_governance_added_in_diff_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7155,9 +6956,7 @@ fn test_impl_check_committed_modified_file() {
     std::fs::write(repo.join("src").join("lib.rs"), b"pub fn lib() {}").unwrap();
     commit_file(&repo, "src/lib.rs");
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.contains("1"), "expected 1 changed: {}", out);
+    assert_phase4_success_exact(&output, &repo, 1);
     assert_no_temp_files(&repo);
 }
 
@@ -7181,9 +6980,7 @@ fn test_impl_check_staged_added_file() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.contains("1"), "expected 1 changed: {}", out);
+    assert_phase4_success_exact(&output, &repo, 1);
     assert_no_temp_files(&repo);
 }
 
@@ -7200,9 +6997,7 @@ fn test_impl_check_untracked_added_file() {
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src").join("untracked.rs"), b"fn untracked() {}").unwrap();
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    assert!(out.contains("1"), "expected 1 changed: {}", out);
+    assert_phase4_success_exact(&output, &repo, 1);
     assert_no_temp_files(&repo);
 }
 
@@ -7239,7 +7034,7 @@ fn test_impl_check_committed_deleted_file() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_success(&output);
+    assert_phase4_success_exact(&output, &repo, 1);
     assert_no_temp_files(&repo);
 }
 
@@ -7277,7 +7072,7 @@ fn test_impl_check_allowed_rename() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_success(&output);
+    assert_phase4_success_exact(&output, &repo, 2);
     assert_no_temp_files(&repo);
 }
 
@@ -7331,12 +7126,7 @@ fn test_impl_check_rename_dest_not_allowed() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CHANGE_NOT_ALLOWED"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
     assert_no_temp_files(&repo);
 }
 
@@ -7373,8 +7163,7 @@ fn test_impl_check_forbidden_case_alias() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_COMMAND_FAILED");
+    assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
     assert_no_temp_files(&repo);
 }
 
@@ -7426,12 +7215,7 @@ fn test_impl_check_forbidden_over_allowed_precedence() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CHANGE_FORBIDDEN"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CHANGE_FORBIDDEN");
     assert_no_temp_files(&repo);
 }
 
@@ -7483,12 +7267,7 @@ fn test_impl_check_exact_file_rule_no_suffix() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CHANGE_NOT_ALLOWED"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
     assert_no_temp_files(&repo);
 }
 
@@ -7536,12 +7315,7 @@ fn test_impl_check_dir_rule_segment_boundary() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CHANGE_NOT_ALLOWED"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
     assert_no_temp_files(&repo);
 }
 
@@ -7556,10 +7330,7 @@ fn test_impl_check_zero_changes() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    let parts: Vec<&str> = out.split_whitespace().collect();
-    assert_eq!(parts[4], "0", "expected 0 changed paths: {}", out);
+    assert_phase4_success_exact(&output, &repo, 0);
     assert_no_temp_files(&repo);
 }
 
@@ -7576,12 +7347,7 @@ fn test_impl_error_format_exact() {
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert_eq!(output.stdout.len(), 0, "stdout must be empty on failure");
-    assert_eq!(
-        stderr_string(&output),
-        "error: IMPLEMENTATION_AUTHORITY_MISSING"
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_MISSING");
     assert_no_temp_files(&repo);
 }
 
@@ -7591,12 +7357,10 @@ fn test_impl_no_stdout_on_failure() {
     let (_dir, repo) = setup_implementation_basic();
     let output = run_implementation_begin_str(
         &repo,
-        "-1",
+        "abc",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    let out = stdout_string(&output);
-    assert_eq!(out, "", "stdout should be empty on failure");
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -7609,8 +7373,7 @@ fn test_impl_error_category_invalid_argument() {
         "abc",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: INVALID_ARGUMENT");
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -7619,18 +7382,7 @@ fn test_impl_error_category_invalid_argument() {
 fn test_impl_no_backtrace_in_error() {
     let (_dir, repo) = setup_implementation_basic();
     let output = run_implementation_begin_str(&repo, "abc", "bad");
-    assert_failure(&output);
-    let err = stderr_string(&output);
-    assert!(
-        !err.contains("backtrace"),
-        "error should not contain backtrace: {}",
-        err
-    );
-    assert!(
-        !err.contains("stack"),
-        "error should not contain stack trace: {}",
-        err
-    );
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -7653,12 +7405,7 @@ fn test_impl_check_stale_after_new_acceptance() {
     assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
     assert_success(&run_contract_accept(&repo, 2, &v2_sha, "ACCEPTED"));
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_STALE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_STALE");
     assert_no_temp_files(&repo);
 }
 
@@ -7677,13 +7424,7 @@ fn test_impl_check_newer_unaccepted_draft_does_not_stale() {
     commit_file(&repo, "contract.toml");
     assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("CHANGE_NOT_ALLOWED"),
-        "expected CHANGE_NOT_ALLOWED, got exit: {} stderr: {}",
-        output.status.code().unwrap_or(-1),
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
     assert_no_temp_files(&repo);
 }
 
@@ -7702,12 +7443,7 @@ fn test_impl_check_stale_after_plan_change() {
     write_plan(&plan_path, &new_plan);
     commit_file(&repo, "plan.toml");
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("GOVERNANCE_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "GOVERNANCE_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7741,12 +7477,7 @@ fn test_impl_begin_empty_revision() {
         "",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("INVALID_ARGUMENT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -7759,12 +7490,7 @@ fn test_impl_begin_leading_zero_revision() {
         "01",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("INVALID_ARGUMENT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -7777,12 +7503,7 @@ fn test_impl_begin_sign_prefix_revision() {
         "+1",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("INVALID_ARGUMENT"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -7795,8 +7516,7 @@ fn test_impl_begin_non_digit_revision() {
         "abc",
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: INVALID_ARGUMENT");
+    assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
     assert_no_temp_files(&repo);
 }
 
@@ -7807,12 +7527,7 @@ fn test_impl_check_no_governance() {
     let repo = dir.path().join("repo");
     git_init(&repo);
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("GOVERNANCE_AUTHORITY_INVALID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "GOVERNANCE_AUTHORITY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -7825,12 +7540,7 @@ fn test_impl_check_no_record_after_contract_accept() {
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("IMPLEMENTATION_AUTHORITY_MISSING"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_MISSING");
     assert_no_temp_files(&repo);
 }
 
@@ -7866,8 +7576,7 @@ fn test_impl_begin_git_dirty_error_category() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     std::fs::write(repo.join("UNTRACKED.txt"), b"dirty").unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_DIRTY");
+    assert_phase4_failure_exact(&output, "GIT_DIRTY");
     assert_no_temp_files(&repo);
 }
 
@@ -7900,7 +7609,8 @@ fn test_impl_begin_persists_correct_sha() {
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
-    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let begin_output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_begin_exact(&begin_output, &repo);
     let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
     assert_eq!(record["contract_sha256"].as_str().unwrap(), &final_sha);
     assert_no_temp_files(&repo);
@@ -7916,11 +7626,7 @@ fn test_impl_begin_output_contains_baseline() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    let parts: Vec<&str> = out.split_whitespace().collect();
-    assert_eq!(parts.len(), 5);
-    assert_eq!(parts[4].len(), 40);
+    assert_phase4_begin_exact(&output, &repo);
     assert_no_temp_files(&repo);
 }
 
@@ -7934,14 +7640,9 @@ fn test_impl_check_output_baseline_unchanged() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let begin_output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_success(&begin_output);
-    let begin_stdout = stdout_string(&begin_output);
-    let begin_parts: Vec<&str> = begin_stdout.split_whitespace().collect();
+    assert_phase4_begin_exact(&begin_output, &repo);
     let check_output = run_implementation_check(&repo);
-    assert_success(&check_output);
-    let check_stdout = stdout_string(&check_output);
-    let check_parts: Vec<&str> = check_stdout.split_whitespace().collect();
-    assert_eq!(begin_parts[3], check_parts[3]);
+    assert_phase4_success_exact(&check_output, &repo, 0);
     assert_no_temp_files(&repo);
 }
 
@@ -8036,10 +7737,10 @@ fn test_impl_check_idempotent() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     let first = run_implementation_check(&repo);
-    assert_success(&first);
+    assert_phase4_success_exact(&first, &repo, 0);
     let second = run_implementation_check(&repo);
-    assert_success(&second);
-    assert_eq!(stdout_string(&first), stdout_string(&second));
+    assert_phase4_success_exact(&second, &repo, 0);
+    assert_eq!(first.stdout, second.stdout);
     assert_no_temp_files(&repo);
 }
 
@@ -8055,7 +7756,7 @@ fn test_impl_check_multiple_calls() {
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     for _ in 0..3 {
         let output = run_implementation_check(&repo);
-        assert_success(&output);
+        assert_phase4_success_exact(&output, &repo, 0);
     }
     assert_no_temp_files(&repo);
 }
@@ -8083,11 +7784,7 @@ fn test_impl_check_multiple_changed_paths() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_success(&output);
-    let out = stdout_string(&output);
-    let parts: Vec<&str> = out.split_whitespace().collect();
-    let count: u32 = parts[4].parse().unwrap();
-    assert!(count >= 2, "expected at least 2 changes: {}", out);
+    assert_phase4_success_exact(&output, &repo, 3);
     assert_no_temp_files(&repo);
 }
 
@@ -8109,8 +7806,7 @@ fn test_impl_begin_sparse_directory_rejected() {
         .status()
         .unwrap();
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_failure(&output);
-    assert_eq!(stderr_string(&output), "error: GIT_INVENTORY_INVALID");
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
 }
 
@@ -8147,12 +7843,7 @@ fn test_impl_symlink_inspection_no_panic() {
         .status()
         .unwrap();
     let output = run_implementation_check(&repo);
-    assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("FILESYSTEM_BOUNDARY_UNSAFE"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
+    assert_phase4_failure_exact(&output, "FILESYSTEM_BOUNDARY_UNSAFE");
     assert_no_temp_files(&repo);
 }
 
