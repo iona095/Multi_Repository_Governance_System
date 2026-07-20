@@ -6698,6 +6698,64 @@ fn test_impl_begin_index_sparse_true() {
     assert_no_temp_files(&repo);
 }
 
+#[test]
+fn test_impl_begin_records_exact_sparse_state_commands() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let recorder = create_sparse_git_recorder();
+    let revision = final_rev.to_string();
+    let output = run_with_sparse_git_recorder(
+        &recorder,
+        &repo,
+        &[
+            "implementation",
+            "begin",
+            "--revision",
+            &revision,
+            "--sha256",
+            &final_sha,
+        ],
+    );
+    assert_phase4_begin_exact(&output, &repo);
+
+    let queries = [
+        ["config", "--type=bool", "--get", "core.sparseCheckout"],
+        ["config", "--type=bool", "--get-all", "core.sparseCheckout"],
+        ["config", "--type=bool", "--get", "index.sparse"],
+        ["config", "--type=bool", "--get-all", "index.sparse"],
+    ];
+    let invocations = read_sparse_git_recording(&recorder.log);
+    for query in queries {
+        let expected = production_git_args(&repo, &query);
+        assert_eq!(
+            invocations.iter().filter(|args| **args == expected).count(),
+            1,
+            "missing or duplicate exact sparse query: {query:?}; invocations={invocations:?}"
+        );
+    }
+    assert_eq!(
+        invocations
+            .iter()
+            .filter(|args| args
+                .windows(2)
+                .any(|pair| pair == ["config", "--type=bool"]))
+            .count(),
+        4
+    );
+    assert!(invocations.iter().all(|args| {
+        !args.iter().any(|arg| {
+            arg == "fetch"
+                || arg == "fetch-pack"
+                || arg == "credential"
+                || arg.starts_with("remote-")
+        })
+    }));
+}
+
 // 66. assume-unchanged flag rejected at begin
 #[test]
 fn test_impl_begin_assume_unchanged_rejected() {
@@ -6763,6 +6821,54 @@ fn test_impl_check_sparse_checkout_true() {
     let output = run_implementation_check(&repo);
     assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
     assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_impl_check_records_exact_sparse_state_commands() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_sparse_git_recorder();
+    let output = run_with_sparse_git_recorder(&recorder, &repo, &["implementation", "check"]);
+    assert_phase4_success_exact(&output, &repo, 0);
+
+    let queries = [
+        ["config", "--type=bool", "--get", "core.sparseCheckout"],
+        ["config", "--type=bool", "--get-all", "core.sparseCheckout"],
+        ["config", "--type=bool", "--get", "index.sparse"],
+        ["config", "--type=bool", "--get-all", "index.sparse"],
+    ];
+    let invocations = read_sparse_git_recording(&recorder.log);
+    for query in queries {
+        let expected = production_git_args(&repo, &query);
+        assert_eq!(
+            invocations.iter().filter(|args| **args == expected).count(),
+            1,
+            "missing or duplicate exact sparse query: {query:?}; invocations={invocations:?}"
+        );
+    }
+    assert_eq!(
+        invocations
+            .iter()
+            .filter(|args| args
+                .windows(2)
+                .any(|pair| pair == ["config", "--type=bool"]))
+            .count(),
+        4
+    );
+    assert!(invocations.iter().all(|args| {
+        !args.iter().any(|arg| {
+            arg == "fetch"
+                || arg == "fetch-pack"
+                || arg == "credential"
+                || arg.starts_with("remote-")
+        })
+    }));
 }
 
 // 69. Assume-unchanged at check
@@ -10083,6 +10189,93 @@ fn run_wrapper_direct(wrapper: &GitWrapper, args: &[String]) -> std::process::Ou
         .args(args)
         .output()
         .unwrap()
+}
+
+struct SparseGitRecorder {
+    dir: tempfile::TempDir,
+    log: std::path::PathBuf,
+}
+
+fn create_sparse_git_recorder() -> SparseGitRecorder {
+    let dir = tempfile::TempDir::new().unwrap();
+    let wrapper_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&wrapper_dir).unwrap();
+    let log = dir.path().join("git-args.bin");
+    let source = format!(
+        r#"
+use std::env;
+use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::process::Command;
+
+fn main() {{
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let mut log = OpenOptions::new().create(true).append(true).open({log:?}).unwrap();
+    log.write_all(&(args.len() as u64).to_le_bytes()).unwrap();
+    for arg in &args {{
+        let bytes = arg.as_os_str().as_encoded_bytes();
+        log.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
+        log.write_all(bytes).unwrap();
+    }}
+    let status = Command::new({real:?}).args(&args).status().unwrap();
+    std::process::exit(status.code().unwrap_or(1));
+}}
+"#,
+        log = log.display().to_string(),
+        real = real_git_executable().display().to_string(),
+    );
+    let source_path = wrapper_dir.join("git-wrapper.rs");
+    std::fs::write(&source_path, source).unwrap();
+    let wrapper = wrapper_dir.join("git.exe");
+    let compile = Command::new("rustc")
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&wrapper)
+        .output()
+        .unwrap();
+    assert_eq!(compile.status.code(), Some(0));
+    assert!(compile.stdout.is_empty());
+    assert!(compile.stderr.is_empty());
+    SparseGitRecorder { dir, log }
+}
+
+fn run_with_sparse_git_recorder(
+    recorder: &SparseGitRecorder,
+    repo: &Path,
+    operation: &[&str],
+) -> std::process::Output {
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = recorder.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.args(operation)
+        .arg("--repo")
+        .arg(repo)
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    cmd.output().unwrap()
+}
+
+fn read_sparse_git_recording(path: &Path) -> Vec<Vec<String>> {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    let mut offset = 0usize;
+    let mut invocations = Vec::new();
+    while offset < bytes.len() {
+        assert!(bytes.len() - offset >= 8, "truncated invocation count");
+        let argc = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+        let mut args = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            assert!(bytes.len() - offset >= 8, "truncated argument length");
+            let len = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+            offset += 8;
+            assert!(bytes.len() - offset >= len, "truncated argument bytes");
+            args.push(String::from_utf8(bytes[offset..offset + len].to_vec()).unwrap());
+            offset += len;
+        }
+        invocations.push(args);
+    }
+    assert_eq!(offset, bytes.len());
+    invocations
 }
 
 fn git_blob(repo: &Path, bytes: &[u8]) -> String {
