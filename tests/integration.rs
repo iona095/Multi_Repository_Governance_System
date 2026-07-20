@@ -7009,11 +7009,11 @@ fn test_impl_check_committed_deleted_file() {
     let sha = draft["sha256"].as_str().unwrap().to_string();
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
-    let (final_rev, final_sha) = contract_accepted_revision(&repo);
-    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src").join("todelete.rs"), b"fn to_delete() {}").unwrap();
     commit_file(&repo, "src/todelete.rs");
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     Command::new("git")
         .arg("-C")
         .arg(&repo)
@@ -7046,11 +7046,11 @@ fn test_impl_check_allowed_rename() {
     let sha = draft["sha256"].as_str().unwrap().to_string();
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
-    let (final_rev, final_sha) = contract_accepted_revision(&repo);
-    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src").join("old.rs"), b"fn old() {}").unwrap();
     commit_file(&repo, "src/old.rs");
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
     Command::new("git")
         .arg("-C")
         .arg(&repo)
