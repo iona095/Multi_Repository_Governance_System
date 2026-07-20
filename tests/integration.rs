@@ -6161,17 +6161,104 @@ fn test_impl_check_promisor_missing_promised_commit() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
-    // Set promisor config
-    std::process::Command::new("git")
+
+    // Create a real commit object that is not the current HEAD, prove it is
+    // locally available, then remove only that commit object from the local
+    // object database. The test must not stand in an arbitrary or all-zero ID
+    // for promised-object evidence.
+    let current_head = git_head_exact(&repo);
+    let tree = String::from_utf8(
+        git(&repo)
+            .arg("rev-parse")
+            .arg("HEAD^{tree}")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let promised_output = git(&repo)
+        .arg("commit-tree")
+        .arg(&tree)
+        .arg("-p")
+        .arg(&current_head)
+        .arg("-m")
+        .arg("promised baseline")
+        .output()
+        .unwrap();
+    assert_success(&promised_output);
+    assert!(promised_output.stderr.is_empty());
+    let promised = String::from_utf8(promised_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(promised.len(), 40);
+    assert!(promised
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert_ne!(promised, current_head);
+
+    let present = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{promised}^{{commit}}"))
+        .output()
+        .unwrap();
+    assert_success(&present);
+    assert!(present.stdout.is_empty());
+    assert!(present.stderr.is_empty());
+
+    // Mark the temporary repository as promisor-enabled without configuring a
+    // remote or alternate object database, so no helper can retrieve the ID.
+    let config = git(&repo)
         .arg("config")
         .arg("extensions.partialClone")
         .arg("origin")
-        .current_dir(&repo)
         .output()
         .unwrap();
-    // Corrupt baseline_head to a missing commit
+    assert_success(&config);
+    assert!(config.stdout.is_empty());
+    assert!(config.stderr.is_empty());
+    let remote = git(&repo)
+        .arg("config")
+        .arg("--get")
+        .arg("remote.origin.url")
+        .output()
+        .unwrap();
+    assert!(!remote.status.success());
+    assert!(remote.stdout.is_empty());
+    assert!(remote.stderr.is_empty());
+    assert!(!repo
+        .join(".git")
+        .join("objects")
+        .join("info")
+        .join("alternates")
+        .exists());
+
+    let object_path = repo
+        .join(".git")
+        .join("objects")
+        .join(&promised[..2])
+        .join(&promised[2..]);
+    assert!(
+        object_path.is_file(),
+        "promised commit was not a loose local object"
+    );
+    std::fs::remove_file(&object_path).unwrap();
+
+    let absent = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{promised}^{{commit}}"))
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+
+    // Record the real, now-unavailable promised commit as the required
+    // baseline. Production must reach the missing-promised-object branch.
     let mut record: serde_json::Value = read_json(&repo, "implementation-authority.json");
-    record["baseline_head"] = serde_json::json!("0000000000000000000000000000000000000000");
+    record["baseline_head"] = serde_json::json!(promised);
     write_json(&repo, "implementation-authority.json", &record);
     let output = run_implementation_check(&repo);
     assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
