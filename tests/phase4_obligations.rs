@@ -1235,6 +1235,20 @@ fn load_valid_registry() -> Registry {
     reg
 }
 
+fn zero_evidence_registry_fixture() -> Registry {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(REGISTRY_REL_PATH);
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read registry fixture at {:?}: {}", path, e));
+    let mut reg = parse_registry(&content).expect("registry fixture parses with strict schema");
+
+    for obligation in &mut reg.obligations {
+        obligation.mapping_status = "UNSATISFIED".to_string();
+        obligation.evidence.clear();
+    }
+
+    reg
+}
+
 // ---------------------------------------------------------------------------
 // Positive structural tests
 // ---------------------------------------------------------------------------
@@ -1313,7 +1327,7 @@ fn registry_rejects_p2d_meta_test_evidence() {
 
 #[test]
 fn zero_evidence_registry_validation_is_discovery_free() {
-    let reg = load_valid_registry();
+    let reg = zero_evidence_registry_fixture();
     assert_eq!(reg.obligation_count, 188);
     assert_eq!(
         reg.obligations
@@ -1337,6 +1351,26 @@ fn zero_evidence_registry_validation_is_discovery_free() {
         0
     );
     validate_registry(&reg).expect("exact D1 registry must validate without evidence discovery");
+}
+
+#[test]
+fn zero_evidence_fixture_discards_live_mapping_state() {
+    let mut reg = zero_evidence_registry_fixture();
+
+    reg.obligations[0].mapping_status = "SATISFIED".to_string();
+    reg.obligations[0].evidence = vec![good_evidence()];
+
+    for obligation in &mut reg.obligations {
+        obligation.mapping_status = "UNSATISFIED".to_string();
+        obligation.evidence.clear();
+    }
+
+    assert!(reg
+        .obligations
+        .iter()
+        .all(|o| o.mapping_status == "UNSATISFIED"));
+    assert!(reg.obligations.iter().all(|o| o.evidence.is_empty()));
+    validate_registry(&reg).expect("synthetic zero-evidence fixture remains discovery-free");
 }
 
 #[test]
