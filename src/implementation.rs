@@ -8,6 +8,64 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+#[cfg(debug_assertions)]
+fn test_only_failpoint_enabled(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| value == "1")
+}
+
+#[cfg(not(debug_assertions))]
+fn test_only_failpoint_enabled(_name: &str) -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+fn test_only_atomic_before_publish() -> Result<(), Error> {
+    let Some(signal) = std::env::var_os("MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_SIGNAL")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let Some(release) = std::env::var_os("MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_RELEASE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(signal)
+        .map_err(|_| Error::PersistenceFailed)?;
+    use std::io::Write;
+    file.write_all(b"reached")
+        .map_err(|_| Error::PersistenceFailed)?;
+    file.sync_all().map_err(|_| Error::PersistenceFailed)?;
+    drop(file);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !release.exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::PersistenceFailed);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn test_only_atomic_before_publish() -> Result<(), Error> {
+    Ok(())
+}
+
+fn test_only_publish_no_clobber(src: &Path, dst: &Path) -> Result<(), Error> {
+    if test_only_failpoint_enabled("MRGS_TEST_ONLY_FORCE_NO_CLOBBER_UNSUPPORTED") {
+        return Err(Error::PersistenceFailed);
+    }
+    rename_noclobber(src, dst)
+}
+
 /// Strictly accept exactly `expected` bytes, optionally followed by exactly one
 /// `\n` or one `\r\n`. No other leading or trailing byte, no repeated line
 /// terminator, no extra line, strict UTF-8 only.
@@ -607,8 +665,7 @@ pub fn tracked_governance_paths(git: &GitRunner, objfmt: &str) -> Result<Vec<Str
         i += nul + 1;
 
         let parsed = parse_index_stage_record(record, objfmt)?;
-        let first_seg = parsed.path.split('/').next().unwrap_or("");
-        if first_seg.eq_ignore_ascii_case(".mrgs") {
+        if is_governance_path(&parsed.path) {
             tracked.push(parsed.path);
         }
     }
@@ -711,8 +768,7 @@ fn parse_index_stage_record(record: &[u8], objfmt: &str) -> Result<IndexStageRec
         _ => return Err(Error::GitInventoryInvalid),
     }
 
-    let first_seg = path.split('/').next().unwrap_or("");
-    if first_seg.eq_ignore_ascii_case(".mrgs") {
+    if is_governance_path(path) {
         return Err(Error::GitInventoryInvalid);
     }
     Ok(IndexStageRecord {
@@ -1162,95 +1218,24 @@ fn validate_begin_cleanliness(
     if !out.status.success() {
         return Err(Error::GitCommandFailed("status failed".into()));
     }
-    let stdout = out.stdout;
-    let mut i = 0;
-    while i < stdout.len() {
-        if stdout[i..].is_empty() {
-            break;
-        }
-        let nul = stdout[i..]
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or(Error::GitInventoryInvalid)?;
-        // Exact `-z` grammar: `XY SP path`. The separator is a single space
-        // byte; no `XYpath` fallback is accepted (BLOCKER 6 / BLOCKER 10).
-        if nul < 4 {
-            return Err(Error::GitInventoryInvalid);
-        }
-        let xy_0 = stdout[i] as char;
-        let xy_1 = stdout[i + 1] as char;
-
-        if stdout[i + 2] != b' ' {
-            return Err(Error::GitInventoryInvalid);
-        }
-        let path_data = &stdout[i + 3..i + nul];
-        // Every porcelain record must have at least one byte of path data
-        // after the `XY SP` prefix and before the NUL terminator.
-        if path_data.is_empty() {
-            return Err(Error::GitInventoryInvalid);
-        }
-        let path_data_str =
-            std::str::from_utf8(path_data).map_err(|_| Error::GitInventoryInvalid)?;
-        let xy = format!("{}{}", xy_0, xy_1);
-
-        // Required classification precedence (BLOCKER 6):
-        // 1. malformed successful evidence (unsupported XY) -> GIT_INVENTORY_INVALID
-        // 2. conflict status -> GIT_CONFLICT
-        // 3. tracked-governance violation -> GIT_INVENTORY_INVALID
-        // 4. ordinary dirty-state result -> GIT_DIRTY
-        // `!!` is unexpected (ignored paths were not requested) and is fatal.
-        if xy_0 == '!' && xy_1 == '!' {
-            return Err(Error::GitInventoryInvalid);
-        }
-        let is_rename_or_copy = xy_0 == 'R' || xy_0 == 'C';
-        // classify_porcelain_xy enforces precedence: conflict -> GIT_CONFLICT,
-        // unsupported XY -> GIT_INVENTORY_INVALID, accepted -> Ok.
-        classify_porcelain_xy(&xy)?;
-
-        // Check if this is a governance path exemption
-        if xy_0 == '?' && xy_1 == '?' {
-            // Do not exempt a `??` governance path before complete path
-            // validation (BLOCKER 6).
-
-            validate_inventory_path(path_data_str)?;
-
-            if !is_exempt_governance_path(path_data_str, auth, tracked_governance) {
+    for record in parse_porcelain_output(&out.stdout)? {
+        let xy_0 = record.xy.as_bytes()[0] as char;
+        if xy_0 == '?' && record.xy == "??" {
+            if !is_exempt_governance_path(&record.path, auth, tracked_governance) {
                 return Err(Error::GitDirty);
             }
-            i += nul + 1;
             continue;
         }
 
-        // Tracked status: a tracked governance path first segment (ASCII
-        // case-insensitive) maps to GIT_INVENTORY_INVALID.
-        validate_inventory_path(path_data_str)?;
-        let first_seg = path_data_str.split('/').next().unwrap_or("");
-        if first_seg.eq_ignore_ascii_case(".mrgs") {
+        if is_governance_path(&record.path) {
             return Err(Error::GitInventoryInvalid);
         }
-
-        // For rename/copy, parse and validate BOTH destination (path_data_str)
-        // and source before applying any tracked-governance or dirty result.
-        if is_rename_or_copy {
-            if i + nul + 1 >= stdout.len() {
-                return Err(Error::GitInventoryInvalid);
-            }
-            let nul2 = stdout[i + nul + 1..]
-                .iter()
-                .position(|&b| b == 0)
-                .ok_or(Error::GitInventoryInvalid)?;
-            let src = std::str::from_utf8(&stdout[i + nul + 1..i + nul + 1 + nul2])
-                .map_err(|_| Error::GitInventoryInvalid)?;
-            // Apply tracked-governance checks to BOTH paths before returning
-            // GIT_DIRTY (BLOCKER 6).
-            validate_inventory_path(src)?;
-            let src_first = src.split('/').next().unwrap_or("");
-            if src_first.eq_ignore_ascii_case(".mrgs") {
+        if let Some(source) = record.source.as_deref() {
+            if is_governance_path(source) {
                 return Err(Error::GitInventoryInvalid);
             }
         }
 
-        // Any remaining tracked status is dirty.
         return Err(Error::GitDirty);
     }
 
@@ -1266,22 +1251,10 @@ fn validate_begin_cleanliness(
     if !ignored_out.status.success() {
         return Err(Error::GitCommandFailed("ls-files ignored failed".into()));
     }
-    let stdout2 = ignored_out.stdout;
-    let mut j = 0;
-    while j < stdout2.len() {
-        if stdout2[j..].is_empty() {
-            break;
-        }
-        let nul = stdout2[j..]
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or(Error::GitInventoryInvalid)?;
-        let path_data = &stdout2[j..j + nul];
-        let path_str = std::str::from_utf8(path_data).map_err(|_| Error::GitInventoryInvalid)?;
-        if !is_exempt_governance_path(path_str, auth, tracked_governance) {
+    for path in parse_ignored_output(&ignored_out.stdout)? {
+        if !is_exempt_governance_path(&path, auth, tracked_governance) {
             return Err(Error::GitDirty);
         }
-        j += nul + 1;
     }
 
     Ok(())
@@ -1302,6 +1275,12 @@ fn is_exempt_governance_path(
     // Only exempt one of the exact fixed paths AND only when Section 6.4
     // proved that no tracked index entry exists for it (contract §6.5).
     gov_paths.contains(&path) && !tracked_governance.iter().any(|p| p == path)
+}
+
+fn is_governance_path(path: &str) -> bool {
+    path.split('/')
+        .next()
+        .is_some_and(|segment| segment.eq_ignore_ascii_case(".mrgs"))
 }
 
 fn atomic_first_publish(gov_dir: &Path, record: &ImplementationAuthority) -> Result<(), Error> {
@@ -1356,8 +1335,13 @@ fn atomic_first_publish(gov_dir: &Path, record: &ImplementationAuthority) -> Res
 
     let tmp_path = tmp_path.ok_or(Error::PersistenceFailed)?;
 
+    if let Err(error) = test_only_atomic_before_publish() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
     // Atomic no-clobber rename.
-    match rename_noclobber(&tmp_path, &dst) {
+    match test_only_publish_no_clobber(&tmp_path, &dst) {
         Ok(()) => Ok(()),
         Err(Error::ImplementationAuthorityConflict) => {
             let _ = std::fs::remove_file(&tmp_path);
@@ -1672,6 +1656,9 @@ pub fn cmd_implementation_check(repo_arg: &str) -> Result<String, Error> {
     let mut validated_count = 0u32;
     for path in &inventory {
         rules::validate_changed_path(path)?;
+        if test_only_failpoint_enabled("MRGS_TEST_ONLY_FORCE_CHANGE_PATH_INVALID") {
+            return Err(Error::ChangePathInvalid);
+        }
 
         // Section 12.3: inspect HEAD and index symlink layers for this path
         // before live-layer inspection. The raw-diff entries carry the exact
@@ -2379,8 +2366,11 @@ fn parse_raw_diff_entries(
     if !diff_out.status.success() {
         return Err(Error::GitCommandFailed("diff inventory failed".into()));
     }
+    parse_raw_diff_output(&diff_out.stdout, objfmt)
+}
+
+fn parse_raw_diff_output(stdout: &[u8], objfmt: &str) -> Result<Vec<RawDiffEntry>, Error> {
     let mut entries = Vec::new();
-    let stdout = diff_out.stdout;
 
     let mut i = 0;
     while i < stdout.len() {
@@ -2509,6 +2499,13 @@ fn parse_raw_diff_entries(
             }
             _ => src_path.clone(),
         };
+
+        // Raw-diff paths are inventory evidence, so reserved first segments
+        // must be rejected before they enter the ordinary change set. This
+        // also covers rename/copy sources and destinations.
+        if is_governance_path(&src_path) || is_governance_path(&dst_path) {
+            return Err(Error::GitInventoryInvalid);
+        }
 
         entries.push(RawDiffEntry {
             old_mode: old_mode.clone(),
@@ -2640,6 +2637,84 @@ fn validate_inventory_path(path: &str) -> Result<(), Error> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct PorcelainRecord {
+    xy: String,
+    path: String,
+    source: Option<String>,
+}
+
+fn parse_porcelain_output(stdout: &[u8]) -> Result<Vec<PorcelainRecord>, Error> {
+    let mut records = Vec::new();
+    let mut i = 0;
+    while i < stdout.len() {
+        let nul = stdout[i..]
+            .iter()
+            .position(|&byte| byte == 0)
+            .ok_or(Error::GitInventoryInvalid)?;
+        if nul < 4 || stdout[i + 2] != b' ' {
+            return Err(Error::GitInventoryInvalid);
+        }
+        let xy = std::str::from_utf8(&stdout[i..i + 2])
+            .map_err(|_| Error::GitInventoryInvalid)?
+            .to_string();
+        let path_data = &stdout[i + 3..i + nul];
+        if path_data.is_empty() {
+            return Err(Error::GitInventoryInvalid);
+        }
+        let path = std::str::from_utf8(path_data)
+            .map_err(|_| Error::GitInventoryInvalid)?
+            .to_string();
+
+        // `!!` is unexpected (ignored paths were not requested) and fatal.
+        if xy == "!!" {
+            return Err(Error::GitInventoryInvalid);
+        }
+        classify_porcelain_xy(&xy)?;
+        validate_inventory_path(&path)?;
+        i += nul + 1;
+
+        let source = if xy.starts_with('R') || xy.starts_with('C') {
+            if i >= stdout.len() {
+                return Err(Error::GitInventoryInvalid);
+            }
+            let nul2 = stdout[i..]
+                .iter()
+                .position(|&byte| byte == 0)
+                .ok_or(Error::GitInventoryInvalid)?;
+            let source = std::str::from_utf8(&stdout[i..i + nul2])
+                .map_err(|_| Error::GitInventoryInvalid)?
+                .to_string();
+            validate_inventory_path(&source)?;
+            i += nul2 + 1;
+            Some(source)
+        } else {
+            None
+        };
+
+        records.push(PorcelainRecord { xy, path, source });
+    }
+    Ok(records)
+}
+
+fn parse_ignored_output(stdout: &[u8]) -> Result<Vec<String>, Error> {
+    let mut paths = Vec::new();
+    let mut i = 0;
+    while i < stdout.len() {
+        let nul = stdout[i..]
+            .iter()
+            .position(|&byte| byte == 0)
+            .ok_or(Error::GitInventoryInvalid)?;
+        let path = std::str::from_utf8(&stdout[i..i + nul])
+            .map_err(|_| Error::GitInventoryInvalid)?
+            .to_string();
+        validate_inventory_path(&path)?;
+        paths.push(path);
+        i += nul + 1;
+    }
+    Ok(paths)
+}
+
 fn build_change_inventory(
     git: &GitRunner,
     record: &ImplementationAuthority,
@@ -2672,92 +2747,25 @@ fn build_change_inventory(
         return Err(Error::GitCommandFailed("status inventory failed".into()));
     }
     {
-        let stdout = status_out.stdout;
-        let mut i = 0;
-        while i < stdout.len() {
-            if stdout[i..].is_empty() {
-                break;
-            }
-            let nul = stdout[i..]
-                .iter()
-                .position(|&b| b == 0)
-                .ok_or(Error::GitInventoryInvalid)?;
-            // Exact `-z` grammar: `XY SP path`. No `XYpath` fallback (BLOCKER 6 /
-            // BLOCKER 10).
-            if nul < 4 {
-                return Err(Error::GitInventoryInvalid);
-            }
-            let xy_0 = stdout[i] as char;
-            let xy_1 = stdout[i + 1] as char;
-            if stdout[i + 2] != b' ' {
-                return Err(Error::GitInventoryInvalid);
-            }
-            let path_data = &stdout[i + 3..i + nul];
-            if path_data.is_empty() {
-                return Err(Error::GitInventoryInvalid);
-            }
-
-            let path_str =
-                std::str::from_utf8(path_data).map_err(|_| Error::GitInventoryInvalid)?;
-            let xy = format!("{}{}", xy_0, xy_1);
-
-            // `!!` is unexpected (ignored paths were not requested) and fatal.
-            if xy_0 == '!' && xy_1 == '!' {
-                return Err(Error::GitInventoryInvalid);
-            }
-
-            // Required classification precedence (BLOCKER 6): malformed
-            // successful evidence -> GIT_INVENTORY_INVALID; conflict status ->
-            // GIT_CONFLICT; then tracked-governance; then ordinary dirty.
-            classify_porcelain_xy(&xy)?;
-
-            if xy_0 == '?' && xy_1 == '?' {
-                // Do not exempt a `??` governance path before complete path
-                // validation (BLOCKER 6).
-                validate_inventory_path(path_str)?;
-                if is_exempt_governance_path(path_str, auth, tracked_governance) {
-                    i += nul + 1;
+        for record in parse_porcelain_output(&status_out.stdout)? {
+            if record.xy == "??" {
+                if is_exempt_governance_path(&record.path, auth, tracked_governance) {
                     continue;
                 }
-                paths.insert(path_str.to_string());
-                i += nul + 1;
+                paths.insert(record.path);
                 continue;
             }
 
-            // Validate path structure and tracked-governance before inventory.
-            validate_inventory_path(path_str)?;
-            let first_seg = path_str.split('/').next().unwrap_or("");
-            if first_seg.eq_ignore_ascii_case(".mrgs") {
+            if is_governance_path(&record.path) {
                 return Err(Error::GitInventoryInvalid);
             }
-
-            if xy_0 == 'R' || xy_0 == 'C' {
-                // Destination-then-source order in -z porcelain.
-                paths.insert(path_str.to_string());
-                i += nul + 1;
-                if i >= stdout.len() {
+            paths.insert(record.path);
+            if let Some(source) = record.source {
+                if is_governance_path(&source) {
                     return Err(Error::GitInventoryInvalid);
                 }
-                let nul2 = stdout[i..]
-                    .iter()
-                    .position(|&b| b == 0)
-                    .ok_or(Error::GitInventoryInvalid)?;
-                let src = std::str::from_utf8(&stdout[i..i + nul2])
-                    .map_err(|_| Error::GitInventoryInvalid)?;
-                // Apply tracked-governance checks to the source before
-                // inserting (BLOCKER 6).
-                validate_inventory_path(src)?;
-                let src_first = src.split('/').next().unwrap_or("");
-                if src_first.eq_ignore_ascii_case(".mrgs") {
-                    return Err(Error::GitInventoryInvalid);
-                }
-                paths.insert(src.to_string());
-                i += nul2 + 1;
-                continue;
+                paths.insert(source);
             }
-
-            paths.insert(path_str.to_string());
-            i += nul + 1;
         }
     }
 
@@ -2776,25 +2784,10 @@ fn build_change_inventory(
         ));
     }
     {
-        let stdout = ignored_out.stdout;
-        let mut i = 0;
-        while i < stdout.len() {
-            if stdout[i..].is_empty() {
-                break;
+        for path in parse_ignored_output(&ignored_out.stdout)? {
+            if !is_exempt_governance_path(&path, auth, tracked_governance) {
+                paths.insert(path);
             }
-            let nul = stdout[i..]
-                .iter()
-                .position(|&b| b == 0)
-                .ok_or(Error::GitInventoryInvalid)?;
-            let path_data = &stdout[i..i + nul];
-            let path_str =
-                std::str::from_utf8(path_data).map_err(|_| Error::GitInventoryInvalid)?;
-            // Validate ignored-inventory path before insertion
-            validate_inventory_path(path_str)?;
-            if !is_exempt_governance_path(path_str, auth, tracked_governance) {
-                paths.insert(path_str.to_string());
-            }
-            i += nul + 1;
         }
     }
 
@@ -2839,6 +2832,77 @@ mod part1_tests {
                 Err(Error::GitInventoryInvalid)
             ));
         }
+    }
+
+    #[test]
+    fn raw_diff_output_accepts_consistent_records_and_rejects_invalid_combinations() {
+        let oid = "a".repeat(40);
+        let zero = "0".repeat(40);
+        let valid = [
+            format!(":000000 100644 {zero} {oid} A\0new\0"),
+            format!(":100644 000000 {oid} {zero} D\0old\0"),
+            format!(":100755 120000 {oid} {oid} M\0link\0"),
+            format!(":100644 100644 {oid} {oid} R50\0old\0new\0"),
+            format!(":100644 100644 {oid} {oid} C100\0source\0copy\0"),
+        ];
+        for record in valid {
+            let entries = parse_raw_diff_output(record.as_bytes(), "sha1").unwrap();
+            assert_eq!(entries.len(), 1);
+        }
+
+        for record in [
+            format!(":100644 100644 {oid} {oid} M50\0path\0"),
+            format!(":100644 100644 {oid} {oid} R\0old\0new\0"),
+            format!(":100644 100644 {oid} {oid} R101\0old\0new\0"),
+            format!(":000000 100644 {oid} {oid} A\0new\0"),
+            format!(":000000 100644 {zero} {zero} A\0new\0"),
+            format!(":100644 000000 {oid} {oid} D\0old\0"),
+            format!(":100644 100644 {zero} {oid} M\0path\0"),
+            format!(":100644 160000 {oid} {oid} M\0submodule\0"),
+            format!(":100644 100644 {oid} {oid} M\0.MRGS/path\0"),
+        ] {
+            assert!(matches!(
+                parse_raw_diff_output(record.as_bytes(), "sha1"),
+                Err(Error::GitInventoryInvalid) | Err(Error::GitSubmoduleUnsupported)
+            ));
+        }
+
+        let sha256_oid = "b".repeat(64);
+        let sha256_record = format!(":100644 100644 {sha256_oid} {sha256_oid} M\0path\0");
+        assert!(parse_raw_diff_output(sha256_record.as_bytes(), "sha256").is_ok());
+    }
+
+    #[test]
+    fn raw_diff_output_rejects_malformed_records_and_requires_complete_stream() {
+        let oid = "a".repeat(40);
+        let malformed = [
+            format!("100644 100644 {oid} {oid} M\0path\0"),
+            format!(":100644 100644 {oid} M\0path\0"),
+            format!(":100644 100644 {oid} {oid} Z\0path\0"),
+            format!(":100644 100644 {oid} {oid} R50\0only-source\0"),
+            format!(":100644 100644 {oid} {oid} M\0path\0orphan"),
+            format!(":100644 100644 {oid} {oid} M\0path"),
+        ];
+        for record in malformed {
+            assert!(matches!(
+                parse_raw_diff_output(record.as_bytes(), "sha1"),
+                Err(Error::GitInventoryInvalid)
+            ));
+        }
+
+        let stream = format!(
+            ":000000 100644 {} {} A\0one\0:100644 000000 {} {} D\0two\0",
+            "0".repeat(40),
+            oid,
+            oid,
+            "0".repeat(40)
+        );
+        assert_eq!(
+            parse_raw_diff_output(stream.as_bytes(), "sha1")
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     // ---- BLOCKER 6: porcelain XY classification ----
@@ -2899,6 +2963,48 @@ mod part1_tests {
             classify_porcelain_xy("Z "),
             Err(Error::GitInventoryInvalid)
         ));
+    }
+
+    #[test]
+    fn porcelain_output_rejects_malformed_records_and_consumes_complete_stream() {
+        let valid = b"?? .mrgs/accepted-plan.json\0R  new.txt\0old.txt\0 M src/file\0";
+        let records = parse_porcelain_output(valid).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].source.as_deref(), Some("old.txt"));
+
+        for output in [
+            b"??path\0".as_slice(),
+            b"Z  path\0".as_slice(),
+            b"R  new.txt\0".as_slice(),
+            b"R  new.txt\0old.txt".as_slice(),
+            b" M path\0trailing".as_slice(),
+            b" M \0".as_slice(),
+            b" M \xff\0".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_porcelain_output(output),
+                Err(Error::GitInventoryInvalid)
+            ));
+        }
+    }
+
+    #[test]
+    fn ignored_output_rejects_malformed_records_and_non_utf8() {
+        assert_eq!(
+            parse_ignored_output(b"ignored/a\0ignored/b\0").unwrap(),
+            vec!["ignored/a", "ignored/b"]
+        );
+        for output in [
+            b"ignored/a".as_slice(),
+            b"ignored/a\0trailing".as_slice(),
+            b"\0".as_slice(),
+            b"ignored/\xff\0".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_ignored_output(output),
+                Err(Error::GitInventoryInvalid)
+            ));
+        }
     }
 
     // ---- BLOCKER 3/4/5: symlink target lexical validation ----
@@ -3007,6 +3113,32 @@ mod part1_tests {
     fn index_stage_z_rejects_wrong_path() {
         let out = b"100644 abc123 0\tx/y\x00";
         assert!(parse_index_stage_z(out, "a/b", "sha1").is_err());
+    }
+
+    #[test]
+    fn index_stage_parser_covers_modes_object_lengths_and_malformed_shapes() {
+        let sha1 = "a".repeat(40);
+        for mode in ["100644", "100755", "120000"] {
+            let out = format!("{mode} {sha1} 0\ta/b\0");
+            assert!(parse_index_stage_z(out.as_bytes(), "a/b", "sha1").is_ok());
+        }
+        let sha256 = "b".repeat(64);
+        let out = format!("100644 {sha256} 0\ta/b\0");
+        assert!(parse_index_stage_z(out.as_bytes(), "a/b", "sha256").is_ok());
+
+        for out in [
+            b"10064 a 0\ta/b\0".as_slice(),
+            b"100999 a 0\ta/b\0".as_slice(),
+            b"100644 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 0\ta/b\0".as_slice(),
+            b"100644 a 0\ta/b extra\0".as_slice(),
+            b"100644 a 0\ta/b".as_slice(),
+            b"100644 a\ta/b\0".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_index_stage_z(out, "a/b", "sha1"),
+                Err(Error::GitInventoryInvalid)
+            ));
+        }
     }
 
     // ---- BLOCKER 5: index topology -z sparse-directory parsing ----

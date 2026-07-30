@@ -17,7 +17,7 @@ impl PathRuleSet {
             if is_reserved_scope(rule) {
                 return Err(crate::error::Error::ContractPathRuleInvalid);
             }
-            if !seen_allowed.insert(rule.clone()) {
+            if !seen_allowed.insert(normalize_rule(rule)) {
                 return Err(crate::error::Error::ContractPathRuleInvalid);
             }
             validated_allowed.push(rule.clone());
@@ -27,7 +27,7 @@ impl PathRuleSet {
         let mut validated_forbidden = Vec::new();
         for rule in &contract.forbidden_paths {
             validate_rule(rule)?;
-            if !seen_forbidden.insert(rule.clone()) {
+            if !seen_forbidden.insert(normalize_rule(rule)) {
                 return Err(crate::error::Error::ContractPathRuleInvalid);
             }
             validated_forbidden.push(rule.clone());
@@ -92,6 +92,9 @@ pub fn validate_rule(rule: &str) -> Result<(), crate::error::Error> {
     if rule.is_empty() {
         return Err(crate::error::Error::ContractPathRuleInvalid);
     }
+    if rule != rule.trim() {
+        return Err(crate::error::Error::ContractPathRuleInvalid);
+    }
     if rule.starts_with('/') || rule.starts_with("//") {
         return Err(crate::error::Error::ContractPathRuleInvalid);
     }
@@ -103,7 +106,7 @@ pub fn validate_rule(rule: &str) -> Result<(), crate::error::Error> {
     if rule.contains('\\') {
         return Err(crate::error::Error::ContractPathRuleInvalid);
     }
-    let normalized = rule.strip_suffix('/').unwrap_or(rule);
+    let normalized = normalize_rule(rule);
     if normalized.is_empty() {
         return Err(crate::error::Error::ContractPathRuleInvalid);
     }
@@ -125,6 +128,10 @@ pub fn validate_rule(rule: &str) -> Result<(), crate::error::Error> {
         return Err(crate::error::Error::ContractPathRuleInvalid);
     }
     Ok(())
+}
+
+fn normalize_rule(rule: &str) -> &str {
+    rule.strip_suffix('/').unwrap_or(rule)
 }
 
 pub fn is_reserved_scope(rule: &str) -> bool {

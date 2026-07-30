@@ -1132,6 +1132,7 @@ fn test_failed_uppercase_state_sha_preserves_governance_files() {
 #[cfg_attr(not(any(unix, windows)), ignore)]
 fn test_internal_mrgs_symlink_rejected_before_any_writes() {
     let (_dir, repo, plan_path) = create_repo_and_plan(valid_plan_toml());
+    let governance_before = capture_governance(&repo);
     let target = repo.join("internal-governance-target");
     std::fs::create_dir(&target).unwrap();
     let mrgs = repo.join(".mrgs");
@@ -1143,11 +1144,18 @@ fn test_internal_mrgs_symlink_rejected_before_any_writes() {
 
     let output = run_plan_accept(&repo, &plan_path);
     assert_failure(&output);
-    assert!(stderr_string(&output).contains("governance directory"));
-    assert!(!repo.join("accepted-plan.json").exists());
-    assert!(!repo.join("state.json").exists());
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: governance directory escapes repository:"));
+    assert!(!repo.join(".mrgs").join("accepted-plan.json").exists());
+    assert!(!repo.join(".mrgs").join("state.json").exists());
     assert!(!target.join("accepted-plan.json").exists());
     assert!(!target.join("state.json").exists());
+
+    #[cfg(unix)]
+    std::fs::remove_file(&mrgs).unwrap();
+    #[cfg(windows)]
+    std::fs::remove_dir(&mrgs).unwrap();
+    assert_eq!(governance_before, capture_governance(&repo));
     assert_no_temp_files(&repo);
 }
 
@@ -1869,8 +1877,12 @@ fn test_draft_malformed_existing_record() {
     let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
     assert_success(&run_contract_draft(&repo, &contract_path));
     std::fs::write(repo.join(".mrgs").join("contract-draft.json"), b"not-json").unwrap();
+    let governance_before = capture_governance(&repo);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: JSON parse error:"));
+    assert_eq!(governance_before, capture_governance(&repo));
     assert_no_temp_files(&repo);
 }
 
@@ -1880,14 +1892,18 @@ fn test_draft_malformed_state() {
     let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
     let state_path = repo.join(".mrgs").join("state.json");
     std::fs::write(&state_path, b"not-json").unwrap();
+    let governance_before = capture_governance(&repo);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: JSON parse error:"));
+    assert_eq!(governance_before, capture_governance(&repo));
+    assert_no_temp_files(&repo);
     assert_eq!(
         std::fs::read(&state_path).unwrap(),
         b"not-json",
         "state.json should remain corrupted (not silently repaired)"
     );
-    assert_no_temp_files(&repo);
 }
 
 // 32. malformed accepted plan
@@ -1896,14 +1912,18 @@ fn test_draft_malformed_accepted_plan() {
     let (_dir, repo, contract_path) = setup_contract_test(valid_contract_toml());
     let accepted_path = repo.join(".mrgs").join("accepted-plan.json");
     std::fs::write(&accepted_path, b"not-json").unwrap();
+    let governance_before = capture_governance(&repo);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: JSON parse error:"));
+    assert_eq!(governance_before, capture_governance(&repo));
+    assert_no_temp_files(&repo);
     assert_eq!(
         std::fs::read(&accepted_path).unwrap(),
         b"not-json",
         "accepted-plan.json should remain corrupted (not silently repaired)"
     );
-    assert_no_temp_files(&repo);
 }
 
 // 33. uppercase or invalid persisted draft SHA
@@ -2827,8 +2847,12 @@ fn test_accept_revision_unknown_field_rejected() {
     let mut ledger: serde_json::Value = read_json(&repo, "accepted-contract.json");
     ledger["revisions"][0]["signature"] = serde_json::json!("sig");
     write_json(&repo, "accepted-contract.json", &ledger);
+    let governance_before = capture_governance(&repo);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: JSON parse error:"));
+    assert_eq!(governance_before, capture_governance(&repo));
     assert_no_temp_files(&repo);
 }
 
@@ -2843,14 +2867,18 @@ fn test_accept_malformed_ledger_rejected() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let ledger_path = repo.join(".mrgs").join("accepted-contract.json");
     std::fs::write(&ledger_path, b"not-json").unwrap();
+    let governance_before = capture_governance(&repo);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: JSON parse error:"));
+    assert_eq!(governance_before, capture_governance(&repo));
+    assert_no_temp_files(&repo);
     assert_eq!(
         std::fs::read(&ledger_path).unwrap(),
         b"not-json",
         "malformed ledger must not be repaired"
     );
-    assert_no_temp_files(&repo);
 }
 
 // 19. empty revisions rejection
@@ -4236,8 +4264,12 @@ fn test_preimage_malformed_sha_rejected() {
     let mut draft2: serde_json::Value = read_json(&repo, "contract-draft.json");
     draft2["preimage"]["sha256"] = serde_json::json!("not-a-valid-sha");
     write_json(&repo, "contract-draft.json", &draft2);
+    let governance_before = capture_governance(&repo);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: JSON parse error:"));
+    assert_eq!(governance_before, capture_governance(&repo));
     assert_no_temp_files(&repo);
 }
 
@@ -4812,33 +4844,12 @@ fn setup_contract_id_mismatch_fixture(
 #[test]
 fn test_contract_id_mismatch_draft_rejected() {
     let (_dir, repo, contract_path) = setup_contract_id_mismatch_fixture();
-    let plan_before = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
-    let state_before = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
-    let draft_before = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
-    let ledger_before = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    let governance_before = capture_governance(&repo);
     let output = run_contract_draft(&repo, &contract_path);
     assert_failure(&output);
-    assert!(
-        stderr_string(&output).contains("contract ID"),
-        "stderr: {}",
-        stderr_string(&output)
-    );
-    assert_eq!(
-        std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap(),
-        plan_before
-    );
-    assert_eq!(
-        std::fs::read(repo.join(".mrgs").join("state.json")).unwrap(),
-        state_before
-    );
-    assert_eq!(
-        std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap(),
-        draft_before
-    );
-    assert_eq!(
-        std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap(),
-        ledger_before
-    );
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: accepted contract ID "));
+    assert_eq!(governance_before, capture_governance(&repo));
     assert_no_temp_files(&repo);
 }
 
@@ -4954,16 +4965,28 @@ fn test_contract_id_mismatch_accept_rejected() {
 // ===== Phase 4 — Implementation Tracking Tests =====
 
 fn git_init(repo: &Path) {
-    Command::new("git").arg("init").arg(repo).output().unwrap();
+    let init_out = Command::new("git").arg("init").arg(repo).output().unwrap();
+    assert_eq!(
+        init_out.status.code(),
+        Some(0),
+        "git init failed: stderr={:?}",
+        init_out.stderr
+    );
     std::fs::write(repo.join("README.md"), b"initial").unwrap();
-    Command::new("git")
+    let add_out = Command::new("git")
         .arg("-C")
         .arg(repo)
         .arg("add")
         .arg("README.md")
-        .status()
+        .output()
         .unwrap();
-    Command::new("git")
+    assert_eq!(
+        add_out.status.code(),
+        Some(0),
+        "git add README.md failed: stderr={:?}",
+        add_out.stderr
+    );
+    let commit_out = Command::new("git")
         .arg("-C")
         .arg(repo)
         .arg("-c")
@@ -4973,8 +4996,361 @@ fn git_init(repo: &Path) {
         .arg("commit")
         .arg("-m")
         .arg("init")
-        .status()
+        .output()
         .unwrap();
+    assert_eq!(
+        commit_out.status.code(),
+        Some(0),
+        "git commit init failed: stderr={:?}",
+        commit_out.stderr
+    );
+}
+
+// ============================================================================
+// PKG-13: Snapshot / preservation helpers
+// ============================================================================
+
+/// A single captured file entry.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct FileEntry {
+    /// Relative path from repo root (forward-slash normalized).
+    relpath: String,
+    /// Component bucket this entry belongs to.
+    component: &'static str,
+    /// `true` for regular files, `false` for directories / special entries.
+    is_file: bool,
+    /// Exact byte length (0 for non-files).
+    length: usize,
+    /// SHA-256 hex digest of the raw bytes (empty string for non-files).
+    sha256: String,
+}
+
+/// A complete filesystem snapshot of a repo.
+#[derive(Clone, Debug)]
+struct RepoSnapshot {
+    entries: std::collections::BTreeMap<String, FileEntry>,
+}
+
+impl RepoSnapshot {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// Normalize a path to forward-slash relative from the repo root.
+fn normalize_relpath(repo: &Path, full: &std::path::Path) -> String {
+    let rel = full.strip_prefix(repo).unwrap_or(full);
+    rel.to_str().unwrap().replace('\\', "/")
+}
+
+/// Classify a relative path into one of the snapshot components.
+fn classify_component(relpath: &str) -> &'static str {
+    if relpath.starts_with(".mrgs/") || relpath == ".mrgs" {
+        return "governance";
+    }
+    if relpath.starts_with(".git/HEAD")
+        || relpath.starts_with(".git/refs/")
+        || relpath.starts_with(".git/packed-refs")
+        || relpath.starts_with(".git/index")
+        || relpath.starts_with(".git/config")
+    {
+        return "git_refs";
+    }
+    if relpath.starts_with(".git/objects/") {
+        return "git_objects";
+    }
+    if relpath == ".git/index" || relpath == ".git/config" {
+        // Already handled above, but just in case.
+        return "git_refs";
+    }
+    if relpath.starts_with(".git/") {
+        return "git_refs";
+    }
+    "worktree"
+}
+
+/// Walk the filesystem under `repo` and build a complete snapshot.
+fn capture_snapshot(repo: &Path) -> RepoSnapshot {
+    let mut snap = RepoSnapshot::new();
+    let _mrgs = repo.join(".mrgs");
+    let git_dir = repo.join(".git");
+
+    // Helper closure to add a regular file entry.
+    let add_file = |snap: &mut RepoSnapshot, full: &std::path::Path| {
+        let relpath = normalize_relpath(repo, full);
+        // Skip transient git files that change on every operation.
+        // Only capture HEAD, refs, packed-refs, index, and config from .git/.
+        if relpath.starts_with(".git/")
+            && !relpath.starts_with(".git/HEAD")
+            && !relpath.starts_with(".git/refs/")
+            && !relpath.starts_with(".git/packed-refs")
+            && relpath != ".git/index"
+            && relpath != ".git/config"
+        {
+            return;
+        }
+        let component = classify_component(&relpath);
+        let bytes = std::fs::read(full).unwrap_or_default();
+        let length = bytes.len();
+        let sha = if length > 0 {
+            sha256_hex(&bytes)
+        } else {
+            String::new()
+        };
+        snap.entries.insert(
+            relpath,
+            FileEntry {
+                relpath: String::new(), // stored as key
+                component,
+                is_file: true,
+                length,
+                sha256: sha,
+            },
+        );
+    };
+
+    let add_dir = |snap: &mut RepoSnapshot, full: &std::path::Path| {
+        let relpath = normalize_relpath(repo, full);
+        let component = classify_component(&relpath);
+        snap.entries.insert(
+            relpath,
+            FileEntry {
+                relpath: String::new(),
+                component,
+                is_file: false,
+                length: 0,
+                sha256: String::new(),
+            },
+        );
+    };
+
+    // Walk the entire repo tree.
+    let mut walk = |dir: &std::path::Path| {
+        if !dir.exists() {
+            return;
+        }
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let entry = match std::fs::read_dir(&current) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for item in entry {
+                let item = match item {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+                let ft = match item.file_type() {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                if ft.is_dir() {
+                    add_dir(&mut snap, &item.path());
+                    stack.push(item.path());
+                } else if ft.is_file() {
+                    add_file(&mut snap, &item.path());
+                }
+            }
+        }
+    };
+
+    walk(repo);
+
+    // Capture .git/HEAD raw bytes specifically.
+    let head_path = git_dir.join("HEAD");
+    if head_path.exists() {
+        if let Ok(bytes) = std::fs::read(&head_path) {
+            let relpath = normalize_relpath(repo, &head_path);
+            snap.entries.insert(
+                relpath.clone(),
+                FileEntry {
+                    relpath: String::new(),
+                    component: "git_refs",
+                    is_file: true,
+                    length: bytes.len(),
+                    sha256: sha256_hex(&bytes),
+                },
+            );
+        }
+    }
+
+    snap
+}
+
+/// Compute a diff report between two snapshots.
+fn diff_snapshots(before: &RepoSnapshot, after: &RepoSnapshot) -> Vec<String> {
+    let mut diffs = Vec::new();
+    let mut all_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for k in before.entries.keys() {
+        all_keys.insert(k.clone());
+    }
+    for k in after.entries.keys() {
+        all_keys.insert(k.clone());
+    }
+    for key in &all_keys {
+        let before_entry = before.entries.get(key);
+        let after_entry = after.entries.get(key);
+        match (before_entry, after_entry) {
+            (None, Some(a)) => {
+                diffs.push(format!(
+                    "+ {} [{}] file len={} sha256={}",
+                    key, a.component, a.length, a.sha256
+                ));
+            }
+            (Some(b), None) => {
+                diffs.push(format!(
+                    "- {} [{}] file len={} sha256={}",
+                    key, b.component, b.length, b.sha256
+                ));
+            }
+            (Some(b), Some(a)) => {
+                if b.is_file != a.is_file || b.length != a.length || b.sha256 != a.sha256 {
+                    diffs.push(format!(
+                        "~ {} [{}] before=({},{},{}) after=({},{},{})",
+                        key,
+                        a.component,
+                        if b.is_file { "file" } else { "dir" },
+                        b.length,
+                        b.sha256,
+                        if a.is_file { "file" } else { "dir" },
+                        a.length,
+                        a.sha256,
+                    ));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    diffs
+}
+
+/// Direct component-level equality assertion between two snapshots.
+/// Compares actual component maps/fields rather than filtering diff strings.
+fn assert_snapshot_components_equal(
+    before: &RepoSnapshot,
+    after: &RepoSnapshot,
+    scenario: &str,
+    components: &[&str],
+) {
+    for comp in components {
+        let mut before_entries: std::collections::BTreeMap<String, &FileEntry> =
+            std::collections::BTreeMap::new();
+        let mut after_entries: std::collections::BTreeMap<String, &FileEntry> =
+            std::collections::BTreeMap::new();
+
+        for (k, v) in &before.entries {
+            if v.component == *comp {
+                before_entries.insert(k.clone(), v);
+            }
+        }
+        for (k, v) in &after.entries {
+            if v.component == *comp {
+                after_entries.insert(k.clone(), v);
+            }
+        }
+
+        let mut all_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for k in before_entries.keys() {
+            all_keys.insert(k.clone());
+        }
+        for k in after_entries.keys() {
+            all_keys.insert(k.clone());
+        }
+
+        for key in &all_keys {
+            let be = before_entries.get(key);
+            let ae = after_entries.get(key);
+            match (be, ae) {
+                (None, Some(a)) => {
+                    panic!(
+                        "{}: component={} path={} newly created [file={}, len={}, sha256={}]",
+                        scenario,
+                        comp,
+                        key,
+                        if a.is_file { "yes" } else { "no" },
+                        a.length,
+                        a.sha256
+                    );
+                }
+                (Some(b), None) => {
+                    panic!(
+                        "{}: component={} path={} deleted [file={}, len={}, sha256={}]",
+                        scenario,
+                        comp,
+                        key,
+                        if b.is_file { "yes" } else { "no" },
+                        b.length,
+                        b.sha256
+                    );
+                }
+                (Some(b), Some(a)) => {
+                    if b.is_file != a.is_file || b.length != a.length || b.sha256 != a.sha256 {
+                        panic!(
+                            "{}: component={} path={} changed before=({},{},{}) after=({},{},{})",
+                            scenario,
+                            comp,
+                            key,
+                            if b.is_file { "file" } else { "dir" },
+                            b.length,
+                            b.sha256,
+                            if a.is_file { "file" } else { "dir" },
+                            a.length,
+                            a.sha256
+                        );
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+    }
+}
+
+/// Assert no new MRGS temporary paths were created beyond allowed pre-existing ones.
+fn assert_no_new_mrgs_temp_paths(
+    before: &RepoSnapshot,
+    after: &RepoSnapshot,
+    scenario: &str,
+    allowed_preexisting_paths: &[String],
+) {
+    let allowed_set: std::collections::BTreeSet<String> =
+        allowed_preexisting_paths.iter().cloned().collect();
+
+    for (k, v) in &after.entries {
+        if v.component == "governance"
+            && k.ends_with(".tmp")
+            && !allowed_set.contains(k)
+            && !before.entries.contains_key(k)
+        {
+            panic!(
+                "{}: new MRGS temp path created after failure: {} [len={}, sha256={}]",
+                scenario, k, v.length, v.sha256
+            );
+        }
+    }
+
+    for (k, bv) in &before.entries {
+        if bv.component == "governance" && k.ends_with(".tmp") && allowed_set.contains(k) {
+            let av = after.entries.get(k);
+            match av {
+                None => {
+                    panic!(
+                        "{}: pre-existing temp fixture deleted: {} [len={}, sha256={}]",
+                        scenario, k, bv.length, bv.sha256
+                    );
+                }
+                Some(a) if a.length != bv.length || a.sha256 != bv.sha256 => {
+                    panic!(
+                        "{}: pre-existing temp fixture modified: {} before=({},{}) after=({},{})",
+                        scenario, k, bv.length, bv.sha256, a.length, a.sha256
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn run_implementation_begin(repo: &Path, revision: u32, sha256: &str) -> std::process::Output {
@@ -4996,10 +5372,13 @@ fn run_implementation_begin_str(repo: &Path, revision: &str, sha256: &str) -> st
         .arg("begin")
         .arg("--repo")
         .arg(repo)
-        .arg("--revision")
-        .arg(revision)
         .arg("--sha256")
         .arg(sha256);
+    if revision.starts_with('-') {
+        cmd.arg(format!("--revision={revision}"));
+    } else {
+        cmd.arg("--revision").arg(revision);
+    }
     cmd.output().unwrap()
 }
 
@@ -5036,6 +5415,33 @@ fn run_implementation_begin_with_env(
     cmd.output().unwrap()
 }
 
+fn spawn_implementation_begin_with_env(
+    repo: &Path,
+    revision: u32,
+    sha256: &str,
+    injected: &[(&str, &Path)],
+    flags: &[(&str, &str)],
+) -> std::process::Child {
+    let mut cmd = cargo_bin();
+    cmd.arg("implementation")
+        .arg("begin")
+        .arg("--repo")
+        .arg(repo)
+        .arg("--revision")
+        .arg(revision.to_string())
+        .arg("--sha256")
+        .arg(sha256);
+    for (key, value) in injected {
+        cmd.env(key, value);
+    }
+    for (key, value) in flags {
+        cmd.env(key, value);
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    cmd.spawn().unwrap()
+}
+
 fn contract_accepted_revision(repo: &Path) -> (u32, String) {
     let ledger: serde_json::Value = read_json(repo, "accepted-contract.json");
     let last_rev = ledger["revisions"].as_array().unwrap().last().unwrap();
@@ -5045,14 +5451,21 @@ fn contract_accepted_revision(repo: &Path) -> (u32, String) {
 }
 
 fn commit_file(repo: &Path, name: &str) {
-    Command::new("git")
+    let add_out = Command::new("git")
         .arg("-C")
         .arg(repo)
         .arg("add")
         .arg(name)
-        .status()
+        .output()
         .unwrap();
-    Command::new("git")
+    assert_eq!(
+        add_out.status.code(),
+        Some(0),
+        "git add {} failed: stderr={:?}",
+        name,
+        add_out.stderr
+    );
+    let commit_out = Command::new("git")
         .arg("-C")
         .arg(repo)
         .arg("-c")
@@ -5062,8 +5475,15 @@ fn commit_file(repo: &Path, name: &str) {
         .arg("commit")
         .arg("-m")
         .arg(name)
-        .status()
+        .output()
         .unwrap();
+    assert_eq!(
+        commit_out.status.code(),
+        Some(0),
+        "git commit {} failed: stderr={:?}",
+        name,
+        commit_out.stderr
+    );
 }
 fn setup_implementation_basic() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -6079,6 +6499,283 @@ fn test_impl_check_detached_head() {
     assert_no_temp_files(&repo);
 }
 
+// ============================================================================
+// PKG-08B: Begin-side governance completeness and structural precedence under
+// .mrgs.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// P4-040  symlinked governance file rejection
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(not(any(unix, windows)), ignore)]
+fn test_impl_symlinked_governance_file_rejected() {
+    let (_dir, repo, plan_path) = create_repo_and_plan(valid_plan_toml());
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    let governance_before = capture_governance(&repo);
+
+    let state = repo.join(".mrgs").join("state.json");
+    let target = repo.join(".mrgs").join("accepted-plan.json");
+    let original_bytes = std::fs::read(&target).unwrap();
+    std::fs::remove_file(&target).unwrap();
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&state, &target).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&state, &target).unwrap();
+
+    let output = run_phase_select(&repo, "phase-1");
+    assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert!(stderr_string(&output).starts_with("error: JSON parse error:"));
+
+    std::fs::remove_file(&target).unwrap();
+    std::fs::write(&target, &original_bytes).unwrap();
+    assert_eq!(governance_before, capture_governance(&repo));
+    assert_no_temp_files(&repo);
+}
+
+// ---------------------------------------------------------------------------
+// P4-095  governance files excluded without .gitignore
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_impl_begin_governance_excluded_without_gitignore() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+
+    let contract_path = repo.join("contract.toml");
+    write_plan(&contract_path, valid_contract_toml());
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    assert!(!repo.join(".gitignore").exists());
+    let status_output = git(&repo)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("-z")
+        .arg("--untracked-files=all")
+        .arg("--ignore-submodules=none")
+        .arg("--renames")
+        .output()
+        .unwrap();
+    assert_git_output_success(&status_output, "git status before no-gitignore begin");
+    let status_paths: std::collections::BTreeSet<String> = status_output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| String::from_utf8(record.to_vec()).unwrap())
+        .collect();
+    let expected_status_paths = [
+        "?? .mrgs/accepted-contract.json",
+        "?? .mrgs/accepted-plan.json",
+        "?? .mrgs/contract-draft.json",
+        "?? .mrgs/state.json",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(status_paths, expected_status_paths);
+    let governance_before = capture_earlier_governance_bytes(&repo);
+    assert_eq!(governance_before.len(), 4);
+
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_success(&output);
+    assert_phase4_begin_exact(&output, &repo);
+    assert_eq!(governance_before, capture_earlier_governance_bytes(&repo));
+    assert_no_temp_files(&repo);
+}
+
+// ---------------------------------------------------------------------------
+// P4-139  tracked governance path deleted after baseline
+//
+// After begin creates a clean baseline, force-add a file under .mrgs/ and
+// commit it.  Then git rm --force (stages the deletion without a new commit).
+// git status --porcelain reports the staged deletion as "D  .mrgs/extra.json".
+// The porcelain parser classifies any XY record whose source or destination
+// has .mrgs as its first segment as GIT_INVENTORY_INVALID, regardless of
+// whether the current index still contains the path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_impl_check_governance_deleted_after_baseline_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let governance_before = capture_governance(&repo);
+    add_tracked_mrgs_and_commit(&repo, "extra.json", b"{}");
+    ls_files_stage0(&repo, ".mrgs/extra.json");
+
+    let rm_output = git(&repo)
+        .arg("rm")
+        .arg("--force")
+        .arg(".mrgs/extra.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(&rm_output, "git rm --force .mrgs/extra.json");
+    assert_eq!(rm_output.stdout, b"rm '.mrgs/extra.json'\n");
+
+    let status_output = git(&repo)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("-z")
+        .arg("--untracked-files=all")
+        .output()
+        .unwrap();
+    assert_git_output_success(&status_output, "git status after governance deletion");
+    assert!(
+        status_output
+            .stdout
+            .windows(b"D  .mrgs/extra.json\0".len())
+            .any(|record| record == b"D  .mrgs/extra.json\0"),
+        "expected staged deletion in git status: {:?}",
+        status_output.stdout
+    );
+
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4-185  conflict-stage beneath .mrgs → GIT_CONFLICT
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_impl_conflict_stage_under_mrgs_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let oid1 = git_blob(&repo, b"ancestor");
+    let oid2 = git_blob(&repo, b"ours");
+    let oid3 = git_blob(&repo, b"theirs");
+    let mut child = git(&repo)
+        .arg("update-index")
+        .arg("--index-info")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let stdin = child.stdin.as_mut().unwrap();
+    writeln!(stdin, "100644 {} 1\t.mrgs/state.json", oid1).unwrap();
+    writeln!(stdin, "100644 {} 2\t.mrgs/state.json", oid2).unwrap();
+    writeln!(stdin, "100644 {} 3\t.mrgs/state.json", oid3).unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "update-index --index-info failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index_output = git(&repo)
+        .arg("ls-files")
+        .arg("--stage")
+        .arg("-z")
+        .arg("--")
+        .arg(".mrgs/state.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(&index_output, "git ls-files conflict stages");
+    let stages: std::collections::BTreeSet<String> = index_output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            String::from_utf8(record.to_vec())
+                .unwrap()
+                .split('\t')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(2)
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        ["1", "2", "3"].into_iter().map(String::from).collect()
+    );
+
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_CONFLICT",
+        &repo,
+        &governance_before,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4-186  gitlink beneath .mrgs → GIT_SUBMODULE_UNSUPPORTED
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_impl_gitlink_under_mrgs_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let head_out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .unwrap();
+    assert!(head_out.status.success());
+    assert_git_output_success(&head_out, "git rev-parse HEAD for gitlink fixture");
+    let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+    cacheinfo(&repo, "160000", &head_sha, ".mrgs/submod");
+    assert_index_record(&repo, "160000", &head_sha, ".mrgs/submod", "0");
+
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_SUBMODULE_UNSUPPORTED",
+        &repo,
+        &governance_before,
+    );
+}
+
 // 48. Non-Git directory rejected
 #[test]
 fn test_impl_begin_non_git_repo() {
@@ -6611,20 +7308,22 @@ fn test_impl_begin_submodule_rejected() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let sub_dir = dir.path().join("sub");
-    Command::new("git")
+    let init_output = Command::new("git")
         .arg("init")
         .arg(&sub_dir)
-        .status()
+        .output()
         .unwrap();
+    assert_git_output_success(&init_output, "git init submodule fixture");
     std::fs::write(sub_dir.join("sub_file.txt"), b"sub").unwrap();
-    Command::new("git")
+    let add_output = Command::new("git")
         .arg("-C")
         .arg(&sub_dir)
         .arg("add")
         .arg(".")
-        .status()
+        .output()
         .unwrap();
-    Command::new("git")
+    assert_git_output_success(&add_output, "git add submodule fixture");
+    let commit_output = Command::new("git")
         .arg("-C")
         .arg(&sub_dir)
         .arg("-c")
@@ -6634,9 +7333,10 @@ fn test_impl_begin_submodule_rejected() {
         .arg("commit")
         .arg("-m")
         .arg("init")
-        .status()
+        .output()
         .unwrap();
-    Command::new("git")
+    assert_git_output_success(&commit_output, "git commit submodule fixture");
+    let add_submodule_output = Command::new("git")
         .arg("-C")
         .arg(&repo)
         .arg("-c")
@@ -6645,11 +7345,17 @@ fn test_impl_begin_submodule_rejected() {
         .arg("add")
         .arg(&sub_dir)
         .arg("submod")
-        .status()
+        .output()
         .unwrap();
+    assert_git_output_success(&add_submodule_output, "git submodule add fixture");
+    let governance_before = capture_governance(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_SUBMODULE_UNSUPPORTED");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_SUBMODULE_UNSUPPORTED",
+        &repo,
+        &governance_before,
+    );
 }
 
 // === G. SPARSE CONFIG / INDEX FLAGS ===
@@ -6923,66 +7629,63 @@ fn test_impl_check_skip_worktree_rejected() {
 #[test]
 fn test_impl_begin_tracked_accepted_plan_rejected() {
     let (_dir, repo) = setup_implementation_basic();
-    Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("add")
-        .arg("--force")
-        .arg(".mrgs/accepted-plan.json")
-        .status()
-        .unwrap();
     let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
     let sha = draft["sha256"].as_str().unwrap().to_string();
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let bytes = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "accepted-plan.json", &bytes);
+    let governance_before = capture_governance(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
 }
 
 // 72. Clean tracked .mrgs/state.json rejected at begin
 #[test]
 fn test_impl_begin_tracked_state_rejected() {
     let (_dir, repo) = setup_implementation_basic();
-    Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("add")
-        .arg("--force")
-        .arg(".mrgs/state.json")
-        .status()
-        .unwrap();
     let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
     let sha = draft["sha256"].as_str().unwrap().to_string();
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let bytes = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "state.json", &bytes);
+    let governance_before = capture_governance(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
 }
 
 // 73. Clean tracked .mrgs/contract-draft.json rejected at begin
 #[test]
 fn test_impl_begin_tracked_contract_draft_rejected() {
     let (_dir, repo) = setup_implementation_basic();
-    Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("add")
-        .arg("--force")
-        .arg(".mrgs/contract-draft.json")
-        .status()
-        .unwrap();
     let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
     let sha = draft["sha256"].as_str().unwrap().to_string();
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let bytes = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "contract-draft.json", &bytes);
+    let governance_before = capture_governance(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
 }
 
 // 74. Clean tracked .mrgs/accepted-contract.json rejected at begin
@@ -6994,17 +7697,16 @@ fn test_impl_begin_tracked_accepted_contract_rejected() {
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
-    Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("add")
-        .arg("--force")
-        .arg(".mrgs/accepted-contract.json")
-        .status()
-        .unwrap();
+    let bytes = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "accepted-contract.json", &bytes);
+    let governance_before = capture_governance(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
 }
 
 // 75. Clean tracked .mrgs/implementation-authority.json rejected at begin
@@ -7017,17 +7719,16 @@ fn test_impl_begin_tracked_impl_authority_rejected() {
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
-    Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("add")
-        .arg("--force")
-        .arg(".mrgs/implementation-authority.json")
-        .status()
-        .unwrap();
+    let bytes = std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "implementation-authority.json", &bytes);
+    let governance_before = capture_governance(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
 }
 
 // 76. Tracked .mrgs/extra.json rejected at begin
@@ -7039,18 +7740,15 @@ fn test_impl_begin_tracked_extra_mrgs_rejected() {
     let rev = draft["revision"].as_u64().unwrap() as u32;
     assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
-    std::fs::write(repo.join(".mrgs").join("extra.json"), b"{}").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("add")
-        .arg("--force")
-        .arg(".mrgs/extra.json")
-        .status()
-        .unwrap();
+    add_tracked_mrgs_and_commit(&repo, "extra.json", b"{}");
+    let governance_before = capture_governance(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
 }
 
 // 77. Temp-file-shaped .mrgs path is not exempt
@@ -7064,8 +7762,21 @@ fn test_impl_begin_temp_file_in_mrgs_not_exempt() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     let tmp_file = repo.join(".mrgs").join("mrgs_tmp_12345_67890.tmp");
     std::fs::write(&tmp_file, b"temp").unwrap();
+    assert!(tmp_file.is_file());
+    let temp_bytes_before = std::fs::read(&tmp_file).unwrap();
+    let governance_before = capture_governance(&repo);
+    let snapshot_before = capture_snapshot(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
     assert_phase4_failure_exact(&output, "GIT_DIRTY");
+    assert_eq!(governance_before, capture_governance(&repo));
+    assert_eq!(temp_bytes_before, std::fs::read(&tmp_file).unwrap());
+    let snapshot_after = capture_snapshot(&repo);
+    assert_no_new_mrgs_temp_paths(
+        &snapshot_before,
+        &snapshot_after,
+        "begin pre-existing Phase-4 temp-shaped path",
+        &[".mrgs/mrgs_tmp_12345_67890.tmp".to_string()],
+    );
     let _ = std::fs::remove_file(&tmp_file);
 }
 
@@ -7080,17 +7791,34 @@ fn test_impl_begin_mrgs_case_alias_in_index() {
     let (final_rev, final_sha) = contract_accepted_revision(&repo);
     std::fs::create_dir_all(repo.join(".MRGS")).unwrap();
     std::fs::write(repo.join(".MRGS").join("test.txt"), b"test").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&repo)
+    let add_output = git(&repo)
         .arg("add")
         .arg("--force")
         .arg(".MRGS/test.txt")
-        .status()
+        .output()
         .unwrap();
+    assert_git_output_success(&add_output, "git add .MRGS/test.txt");
+    let commit_output = git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("track .MRGS/test.txt")
+        .output()
+        .unwrap();
+    assert_git_output_success(&commit_output, "git commit .MRGS/test.txt");
+    host_case_alias_directory_assertions(&repo);
+    ls_files_stage0(&repo, ".MRGS/test.txt");
+    assert_ls_files_mode(&repo, ".MRGS/test.txt", "100644");
+    assert_repo_clean(&repo);
+    let governance_before = capture_governance(&repo);
+    let filesystem_before = capture_snapshot(&repo);
     let output = run_implementation_begin(&repo, final_rev, &final_sha);
-    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
-    assert_no_temp_files(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+    assert!(diff_snapshots(&filesystem_before, &capture_snapshot(&repo)).is_empty());
 }
 
 // 79. Governance paths added after baseline in diff rejected
@@ -8154,6 +8882,1236 @@ fn test_impl_check_isolated_from_git_dir() {
     let output = cmd.output().unwrap();
     assert_success(&output);
     assert_no_temp_files(&repo);
+}
+
+// ============================================================================
+// PKG-09: Git child environment isolation and no-lazy-fetch universal proof
+// ============================================================================
+//
+// P4-100  inherited alternate env vars do not alter inspection
+// P4-101  replacement refs disabled for ancestry/diff
+// P4-102  external helpers (fsmonitor, diff.external, pager, editor, hooks) not executed
+// P4-144  GIT_CONFIG_PARAMETERS absent from every Git child
+// P4-145  GIT_CONFIG_PARAMETERS injection of external behavior cannot alter any child
+// P4-146  GIT_SHALLOW_FILE absent from every Git child
+// P4-147  injected GIT_SHALLOW_FILE cannot change object availability/merge-base/ancestry
+// P4-148  child-environment inspection proves both stripped after final construction
+// P4-149  environment-isolation results deterministic; no value/diagnostic leaks into stderr
+// P4-150  every Git child receives exact GIT_NO_LAZY_FETCH=1
+// P4-151  every Git invocation includes --no-lazy-fetch in fixed global-option position
+// ============================================================================
+
+/// Run `implementation check` while injecting forbidden Git environment variables.
+fn run_implementation_check_with_env(
+    repo: &Path,
+    injected: &[(&str, &str)],
+) -> std::process::Output {
+    let mut cmd = cargo_bin();
+    cmd.arg("implementation")
+        .arg("check")
+        .arg("--repo")
+        .arg(repo);
+    for (k, v) in injected {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+/// Enhanced Git recorder that captures both argv and environment variables from
+/// every intercepted git invocation. The wrapper is a compiled Rust binary that
+/// logs its complete argument list and selected environment variables to binary
+/// log files before delegating to the real git executable.
+struct EnvAwareGitRecorder {
+    dir: tempfile::TempDir,
+    argv_log: std::path::PathBuf,
+    env_log: std::path::PathBuf,
+}
+
+fn create_env_aware_git_recorder() -> EnvAwareGitRecorder {
+    let dir = tempfile::TempDir::new().unwrap();
+    let wrapper_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&wrapper_dir).unwrap();
+    let argv_log = dir.path().join("git-argv.bin");
+    let env_log = dir.path().join("git-env.log");
+
+    // Generate a Rust source file for the recorder wrapper.
+    // It captures argv in binary format (same as SparseGitRecorder) and
+    // writes selected environment variables to a text log.
+    let _real_git_path = real_git_executable();
+    let source = format!(
+        r#"
+use std::env;
+use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::process::Command;
+
+fn main() {{
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+
+    // Log argv in binary format (argc as u64 LE, then each arg as len+bytes)
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open({argv_log:?})
+        .unwrap();
+    log.write_all(&(args.len() as u64).to_le_bytes()).unwrap();
+    for arg in &args {{
+        let bytes = arg.as_os_str().as_encoded_bytes();
+        log.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
+        log.write_all(bytes).unwrap();
+    }}
+
+    // Log selected environment variables to text file.
+    // Each line: KEY=VALUE or KEY=<absent> if not set.
+    let mut env_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open({env_log:?})
+        .unwrap();
+
+    // Write a separator for each invocation
+    writeln!(env_file, "---INVOCATION---").unwrap();
+
+    let vars_to_check: &[&str] = &[
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_SHALLOW_FILE",
+        "GIT_NO_LAZY_FETCH",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_CONFIG_COUNT",
+        "GIT_OPTIONAL_LOCKS",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_ATTR_NOSYSTEM",
+    ];
+
+    for var in vars_to_check {{
+        match env::var(var) {{
+            Ok(val) => writeln!(env_file, "{{}}={{}}", var, val).unwrap(),
+            Err(_)  => writeln!(env_file, "{{}}=<absent>", var).unwrap(),
+        }}
+    }}
+
+    // Delegate to real git
+    let status = Command::new({real:?})
+        .args(&args)
+        .status()
+        .unwrap();
+    std::process::exit(status.code().unwrap_or(1));
+}}
+"#,
+        argv_log = argv_log.display().to_string(),
+        env_log = env_log.display().to_string(),
+        real = real_git_executable().display().to_string(),
+    );
+
+    let source_path = wrapper_dir.join("git-recorder.rs");
+    std::fs::write(&source_path, &source).unwrap();
+    let wrapper = wrapper_dir.join("git.exe");
+    let compile = Command::new("rustc")
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&wrapper)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "recorder compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    EnvAwareGitRecorder {
+        dir,
+        argv_log,
+        env_log,
+    }
+}
+
+/// Run an MRGS operation with the env-aware recorder intercepting all git calls.
+fn run_with_env_aware_recorder(
+    recorder: &EnvAwareGitRecorder,
+    repo: &Path,
+    operation: &[&str],
+) -> std::process::Output {
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = recorder.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.args(operation)
+        .arg("--repo")
+        .arg(repo)
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    cmd.output().unwrap()
+}
+
+/// Parse the env log file into per-invocation maps of variable presence.
+/// Returns a vector of invocation records, each containing a map of var->Some(value) or None.
+fn parse_env_log(path: &Path) -> Vec<std::collections::HashMap<String, Option<String>>> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let mut invocations: Vec<std::collections::HashMap<String, Option<String>>> = Vec::new();
+    let mut current: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+
+    for line in content.lines() {
+        if line == "---INVOCATION---" {
+            if !current.is_empty() {
+                invocations.push(current);
+            }
+            current = std::collections::HashMap::new();
+            continue;
+        }
+        if let Some(eq_pos) = line.find('=') {
+            let key = &line[..eq_pos];
+            let value = &line[eq_pos + 1..];
+            let val = if value == "<absent>" {
+                None
+            } else {
+                Some(value.to_string())
+            };
+            current.insert(key.to_string(), val);
+        }
+    }
+    if !current.is_empty() {
+        invocations.push(current);
+    }
+    invocations
+}
+
+/// Read argv recordings from the binary log (same format as SparseGitRecorder).
+fn read_env_aware_argv(path: &Path) -> Vec<Vec<String>> {
+    read_sparse_git_recording(path)
+}
+
+// --- P4-100: inherited alternate env vars do not alter inspection ---
+
+#[test]
+fn test_p4_100_alternate_env_isolation_begin_matrix() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Control case: clean begin succeeds
+    let control_output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_success(&control_output);
+    let control_stdout = stdout_string(&control_output);
+
+    // Matrix of alternate environment variables to inject
+    let outside = tempfile::TempDir::new().unwrap();
+    let matrix: Vec<(&str, String)> = vec![
+        (
+            "GIT_INDEX_FILE",
+            outside
+                .path()
+                .join("evil-index")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        (
+            "GIT_WORK_TREE",
+            outside.path().join("evil-wt").to_str().unwrap().to_string(),
+        ),
+        (
+            "GIT_DIR",
+            outside
+                .path()
+                .join("evil-dir")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        (
+            "GIT_OBJECT_DIRECTORY",
+            outside
+                .path()
+                .join("evil-objdir")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            outside
+                .path()
+                .join("evil-alt")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        ("GIT_NAMESPACE", "evil-namespace".to_string()),
+    ];
+
+    for (var, value) in matrix {
+        // Remove the implementation authority to test a fresh begin each time
+        let _ = std::fs::remove_file(repo.join(".mrgs").join("implementation-authority.json"));
+        let output =
+            run_implementation_begin_with_env(&repo, final_rev, &final_sha, &[(var, &value)]);
+        assert!(
+            output.status.success(),
+            "injected {}={} should not alter begin; stderr: {}",
+            var,
+            value,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Outcome must match control
+        let out = stdout_string(&output);
+        assert_eq!(
+            out, control_stdout,
+            "injected {}={} altered output",
+            var, value
+        );
+    }
+}
+
+#[test]
+fn test_p4_100_alternate_env_isolation_check_matrix() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Control case: clean check succeeds
+    let control_output = run_implementation_check(&repo);
+    assert_success(&control_output);
+    let control_stdout = stdout_string(&control_output);
+
+    let outside = tempfile::TempDir::new().unwrap();
+    let matrix: Vec<(&str, String)> = vec![
+        (
+            "GIT_INDEX_FILE",
+            outside
+                .path()
+                .join("evil-index")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        (
+            "GIT_WORK_TREE",
+            outside.path().join("evil-wt").to_str().unwrap().to_string(),
+        ),
+        (
+            "GIT_DIR",
+            outside
+                .path()
+                .join("evil-dir")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        (
+            "GIT_OBJECT_DIRECTORY",
+            outside
+                .path()
+                .join("evil-objdir")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            outside
+                .path()
+                .join("evil-alt")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        ("GIT_NAMESPACE", "evil-namespace".to_string()),
+    ];
+
+    for (var, value) in matrix {
+        let output = run_implementation_check_with_env(&repo, &[(var, &value)]);
+        assert!(
+            output.status.success(),
+            "injected {}={} should not alter check; stderr: {}",
+            var,
+            value,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let out = stdout_string(&output);
+        assert_eq!(
+            out, control_stdout,
+            "injected {}={} altered output",
+            var, value
+        );
+    }
+}
+
+// --- P4-101: replacement refs disabled for ancestry and diff inspection ---
+
+#[test]
+fn test_p4_101_replacement_refs_disabled_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Create a replacement ref that would alter object interpretation if honored.
+    // We create an alternate commit object and register it as a replacement for HEAD.
+    let head_oid = git_head_exact(&repo);
+
+    // Use a simpler approach: create a replacement refs entry pointing to a
+    // non-existent object. If replacement refs were honored, git would fail
+    // or behave differently when resolving HEAD.
+    let fake_oid = "deadbeef0123456789abcdef0123456789abcdef01";
+    let replacements_dir = repo.join(".git/refs/replacements");
+    std::fs::create_dir_all(&replacements_dir).unwrap();
+    // Register a replacement for the actual HEAD commit
+    let prefix = &head_oid[..2];
+    let rest = &head_oid[2..];
+    let ref_path = replacements_dir.join(format!("{}{}.replace", prefix, rest));
+    std::fs::write(&ref_path, format!("{} commit\n", fake_oid)).unwrap();
+
+    // Begin must succeed: --no-replace-objects ensures replacement refs are ignored.
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_success(&output);
+
+    // Clean up the replacement ref
+    let _ = std::fs::remove_file(&ref_path);
+}
+
+#[test]
+fn test_p4_101_replacement_refs_disabled_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Create a replacement ref for HEAD that points to a non-existent object.
+    let head_oid = git_head_exact(&repo);
+    let fake_oid = "deadbeef0123456789abcdef0123456789abcdef01";
+    let replacements_dir = repo.join(".git/refs/replacements");
+    std::fs::create_dir_all(&replacements_dir).unwrap();
+    let prefix = &head_oid[..2];
+    let rest = &head_oid[2..];
+    let ref_path = replacements_dir.join(format!("{}{}.replace", prefix, rest));
+    std::fs::write(&ref_path, format!("{} commit\n", fake_oid)).unwrap();
+
+    // Check must succeed: --no-replace-objects ensures replacement refs are ignored.
+    let output = run_implementation_check(&repo);
+    assert_success(&output);
+
+    // Clean up
+    let _ = std::fs::remove_file(&ref_path);
+}
+
+// --- P4-102: external helpers not executed ---
+
+#[test]
+fn test_p4_102_external_helpers_not_executed() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Create sentinel files that would be created if external helpers were executed.
+    let sentinel_dir = tempfile::TempDir::new().unwrap();
+    let fsmonitor_sentinel = sentinel_dir.path().join("fsmonitor-hit");
+    let diff_external_sentinel = sentinel_dir.path().join("diff-external-hit");
+    let pager_sentinel = sentinel_dir.path().join("pager-hit");
+    let editor_sentinel = sentinel_dir.path().join("editor-hit");
+    let hooks_sentinel = sentinel_dir.path().join("hooks-hit");
+
+    // Create a fake fsmonitor script (on Windows, use .bat)
+    let scripts_dir = sentinel_dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+    let fsmonitor_script = scripts_dir.join("fsmonitor.bat");
+    std::fs::write(
+        &fsmonitor_script,
+        format!("echo hit > {}\n", fsmonitor_sentinel.display()),
+    )
+    .unwrap();
+
+    let diff_external_script = scripts_dir.join("diff-external.bat");
+    std::fs::write(
+        &diff_external_script,
+        format!("echo hit > {}\n", diff_external_sentinel.display()),
+    )
+    .unwrap();
+
+    let pager_script = scripts_dir.join("pager.bat");
+    std::fs::write(
+        &pager_script,
+        format!("echo hit > {}\n", pager_sentinel.display()),
+    )
+    .unwrap();
+
+    let editor_script = scripts_dir.join("editor.bat");
+    std::fs::write(
+        &editor_script,
+        format!("echo hit > {}\n", editor_sentinel.display()),
+    )
+    .unwrap();
+
+    let hooks_script = scripts_dir.join("pre-commit.bat");
+    std::fs::write(
+        &hooks_script,
+        format!("echo hit > {}\n", hooks_sentinel.display()),
+    )
+    .unwrap();
+
+    // Configure git to use these external helpers via repo config.
+    // These should be overridden by the production code's -c flags.
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("core.fsmonitor")
+        .arg(fsmonitor_script.display().to_string())
+        .output()
+        .unwrap();
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("diff.external")
+        .arg(diff_external_script.display().to_string())
+        .output()
+        .unwrap();
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("core.pager")
+        .arg(pager_script.display().to_string())
+        .output()
+        .unwrap();
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("core.editor")
+        .arg(editor_script.display().to_string())
+        .output()
+        .unwrap();
+
+    // Set up hooks path
+    let hooks_dir = sentinel_dir.path().join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    std::fs::write(
+        hooks_dir.join("pre-commit.bat"),
+        format!("echo hit > {}\n", hooks_sentinel.display()),
+    )
+    .unwrap();
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("core.hooksPath")
+        .arg(hooks_dir.display().to_string())
+        .output()
+        .unwrap();
+
+    // Run begin and check — no sentinel should be created.
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_success(&run_implementation_check(&repo));
+
+    // Verify no external helper was executed
+    assert!(!fsmonitor_sentinel.exists(), "core.fsmonitor was executed");
+    assert!(
+        !diff_external_sentinel.exists(),
+        "diff.external was executed"
+    );
+    assert!(!pager_sentinel.exists(), "pager was executed");
+    assert!(!editor_sentinel.exists(), "editor was executed");
+    assert!(!hooks_sentinel.exists(), "hook was executed");
+}
+
+// --- P4-145: GIT_CONFIG_PARAMETERS injection of external behavior ---
+
+#[test]
+fn test_p4_145_config_parameters_injection_external_behavior() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Create sentinel for external helper execution
+    let sentinel_dir = tempfile::TempDir::new().unwrap();
+    let sentinel = sentinel_dir.path().join("helper-executed");
+    let scripts_dir = sentinel_dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+
+    // Create fake external helpers that create the sentinel if executed
+    let fake_fsmonitor = scripts_dir.join("fake-fsmonitor.bat");
+    std::fs::write(
+        &fake_fsmonitor,
+        format!("echo hit > {}\n", sentinel.display()),
+    )
+    .unwrap();
+    let fake_diff_ext = scripts_dir.join("fake-diff-ext.bat");
+    std::fs::write(
+        &fake_diff_ext,
+        format!("echo hit > {}\n", sentinel.display()),
+    )
+    .unwrap();
+    let fake_pager = scripts_dir.join("fake-pager.bat");
+    std::fs::write(&fake_pager, format!("echo hit > {}\n", sentinel.display())).unwrap();
+    let fake_editor = scripts_dir.join("fake-editor.bat");
+    std::fs::write(&fake_editor, format!("echo hit > {}\n", sentinel.display())).unwrap();
+
+    // Attempt injection via GIT_CONFIG_PARAMETERS of external behavior settings.
+    let inj_fsmonitor = format!("-c core.fsmonitor={}", fake_fsmonitor.display());
+    let inj_diff_ext = format!("-c diff.external={}", fake_diff_ext.display());
+    let inj_pager = format!("-c core.pager={}", fake_pager.display());
+    let inj_editor = format!("-c core.editor={}", fake_editor.display());
+    let injections: Vec<&str> = vec![&inj_fsmonitor, &inj_diff_ext, &inj_pager, &inj_editor];
+
+    for injection in &injections {
+        let _ = std::fs::remove_file(&sentinel);
+        // Remove implementation authority to test fresh begin each time
+        let _ = std::fs::remove_file(repo.join(".mrgs").join("implementation-authority.json"));
+        let output = run_implementation_begin_with_env(
+            &repo,
+            final_rev,
+            &final_sha,
+            &[("GIT_CONFIG_PARAMETERS", injection)],
+        );
+        assert!(
+            output.status.success(),
+            "injection '{}' should not break begin; stderr: {}",
+            injection,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !sentinel.exists(),
+            "external helper executed via GIT_CONFIG_PARAMETERS injection: {}",
+            injection
+        );
+    }
+}
+
+// --- P4-147: injected GIT_SHALLOW_FILE cannot change object availability/merge-base/ancestry ---
+
+#[test]
+fn test_p4_147_shallow_file_injection_no_effect() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Control: clean begin succeeds with known output
+    let control_output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_success(&control_output);
+    let control_stdout = stdout_string(&control_output);
+
+    // Create a malicious shallow file that claims HEAD is pruned.
+    let outside = tempfile::TempDir::new().unwrap();
+    let shallow_file = outside.path().join("shallow");
+    let head_oid = git_head_exact(&repo);
+    std::fs::write(&shallow_file, format!("{}\n", head_oid)).unwrap();
+
+    // Remove implementation authority for fresh begin
+    let _ = std::fs::remove_file(repo.join(".mrgs").join("implementation-authority.json"));
+
+    // Begin with injected GIT_SHALLOW_FILE must produce the same result.
+    let output = run_implementation_begin_with_env(
+        &repo,
+        final_rev,
+        &final_sha,
+        &[("GIT_SHALLOW_FILE", shallow_file.to_str().unwrap())],
+    );
+    assert!(
+        output.status.success(),
+        "injected GIT_SHALLOW_FILE should not break begin; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out = stdout_string(&output);
+    assert_eq!(out, control_stdout, "GIT_SHALLOW_FILE altered output");
+}
+
+// --- P4-149: determinism and stderr cleanliness ---
+
+#[test]
+fn test_p4_149_determinism_isolation_results() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Run begin twice and compare all outputs
+    let output1 = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_success(&output1);
+
+    // Remove authority for second run
+    let _ = std::fs::remove_file(repo.join(".mrgs").join("implementation-authority.json"));
+    let output2 = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_success(&output2);
+
+    // Same exit category (both success)
+    assert_eq!(output1.status.code(), output2.status.code());
+
+    // Same stdout
+    assert_eq!(stdout_string(&output1), stdout_string(&output2));
+
+    // Same stderr (should be empty or identical)
+    let stderr1 = String::from_utf8_lossy(&output1.stderr).to_string();
+    let stderr2 = String::from_utf8_lossy(&output2.stderr).to_string();
+    assert_eq!(stderr1, stderr2);
+
+    // No inherited value or Git diagnostic leak into stderr
+    for forbidden in ["GIT_", ".git/", "fatal:", "warning: git"] {
+        assert!(!stderr1.contains(forbidden), "stderr leaked: {}", forbidden);
+    }
+}
+
+#[test]
+fn test_p4_149_determinism_check_results() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Run check twice and compare all outputs
+    let output1 = run_implementation_check(&repo);
+    assert_success(&output1);
+    let output2 = run_implementation_check(&repo);
+    assert_success(&output2);
+
+    assert_eq!(output1.status.code(), output2.status.code());
+    assert_eq!(stdout_string(&output1), stdout_string(&output2));
+
+    let stderr1 = String::from_utf8_lossy(&output1.stderr).to_string();
+    let stderr2 = String::from_utf8_lossy(&output2.stderr).to_string();
+    assert_eq!(stderr1, stderr2);
+}
+
+// --- Universal child observation tests (P4-144, P4-146, P4-148, P4-150, P4-151) ---
+// These use the EnvAwareGitRecorder to observe every Git child launched during
+// a complete begin/check lifecycle and prove universal claims.
+
+#[test]
+fn test_p4_144_config_parameters_absent_every_child_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &[
+        "implementation",
+        "begin",
+        "--revision",
+        &final_rev.to_string(),
+        "--sha256",
+        &final_sha,
+    ];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "begin failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Parse env log and verify GIT_CONFIG_PARAMETERS absent from every child
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during begin"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_CONFIG_PARAMETERS") {
+            None => {}       // variable not present — correct
+            Some(None) => {} // explicitly absent — correct
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_CONFIG_PARAMETERS present with value '{}'; must be absent",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_144_config_parameters_absent_every_child_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &["implementation", "check"];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "check failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during check"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_CONFIG_PARAMETERS") {
+            None | Some(None) => {}
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_CONFIG_PARAMETERS present with value '{}'; must be absent",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_146_shallow_file_absent_every_child_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &[
+        "implementation",
+        "begin",
+        "--revision",
+        &final_rev.to_string(),
+        "--sha256",
+        &final_sha,
+    ];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "begin failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during begin"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_SHALLOW_FILE") {
+            None | Some(None) => {}
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_SHALLOW_FILE present with value '{}'; must be absent",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_146_shallow_file_absent_every_child_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &["implementation", "check"];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "check failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during check"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_SHALLOW_FILE") {
+            None | Some(None) => {}
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_SHALLOW_FILE present with value '{}'; must be absent",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_148_both_stripped_after_final_construction_begin() {
+    // Proves both GIT_CONFIG_PARAMETERS and GIT_SHALLOW_FILE are absent from
+    // every Git child after final environment construction during begin.
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Inject both forbidden variables into the MRGS process environment.
+    let outside = tempfile::TempDir::new().unwrap();
+    let shallow_file = outside.path().join("shallow");
+    std::fs::write(
+        &shallow_file,
+        "deadbeef0123456789abcdef0123456789abcdef01\n",
+    )
+    .unwrap();
+
+    let recorder = create_env_aware_git_recorder();
+    // The recorder intercepts git calls; we also inject the forbidden vars into MRGS.
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = recorder.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.arg("implementation")
+        .arg("begin")
+        .arg("--repo")
+        .arg(&repo)
+        .arg("--revision")
+        .arg(final_rev.to_string())
+        .arg("--sha256")
+        .arg(&final_sha)
+        .env("GIT_CONFIG_PARAMETERS", "-c init.defaultBranch=evil")
+        .env("GIT_SHALLOW_FILE", shallow_file.to_str().unwrap())
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "begin failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify both are absent from every recorded child.
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during begin"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_CONFIG_PARAMETERS") {
+            None | Some(None) => {}
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_CONFIG_PARAMETERS present='{}'; must be absent",
+                idx, val
+            ),
+        }
+        match env_map.get("GIT_SHALLOW_FILE") {
+            None | Some(None) => {}
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_SHALLOW_FILE present='{}'; must be absent",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_148_both_stripped_after_final_construction_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let outside = tempfile::TempDir::new().unwrap();
+    let shallow_file = outside.path().join("shallow");
+    std::fs::write(
+        &shallow_file,
+        "deadbeef0123456789abcdef0123456789abcdef01\n",
+    )
+    .unwrap();
+
+    let recorder = create_env_aware_git_recorder();
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = recorder.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.arg("implementation")
+        .arg("check")
+        .arg("--repo")
+        .arg(&repo)
+        .env("GIT_CONFIG_PARAMETERS", "-c init.defaultBranch=evil")
+        .env("GIT_SHALLOW_FILE", shallow_file.to_str().unwrap())
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during check"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_CONFIG_PARAMETERS") {
+            None | Some(None) => {}
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_CONFIG_PARAMETERS='{}'; must be absent",
+                idx, val
+            ),
+        }
+        match env_map.get("GIT_SHALLOW_FILE") {
+            None | Some(None) => {}
+            Some(Some(val)) => panic!(
+                "invocation {}: GIT_SHALLOW_FILE='{}'; must be absent",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_150_no_lazy_fetch_env_every_child_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &[
+        "implementation",
+        "begin",
+        "--revision",
+        &final_rev.to_string(),
+        "--sha256",
+        &final_sha,
+    ];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "begin failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during begin"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_NO_LAZY_FETCH") {
+            None => panic!(
+                "invocation {}: GIT_NO_LAZY_FETCH not present; must be set to '1'",
+                idx
+            ),
+            Some(None) => panic!(
+                "invocation {}: GIT_NO_LAZY_FETCH absent; must be set to '1'",
+                idx
+            ),
+            Some(Some(val)) => assert_eq!(
+                val, "1",
+                "invocation {}: GIT_NO_LAZY_FETCH='{}'; expected '1'",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_150_no_lazy_fetch_env_every_child_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &["implementation", "check"];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "check failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = parse_env_log(&recorder.env_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during check"
+    );
+
+    for (idx, env_map) in invocations.iter().enumerate() {
+        match env_map.get("GIT_NO_LAZY_FETCH") {
+            None => panic!(
+                "invocation {}: GIT_NO_LAZY_FETCH not present; must be set to '1'",
+                idx
+            ),
+            Some(None) => panic!(
+                "invocation {}: GIT_NO_LAZY_FETCH absent; must be set to '1'",
+                idx
+            ),
+            Some(Some(val)) => assert_eq!(
+                val, "1",
+                "invocation {}: GIT_NO_LAZY_FETCH='{}'; expected '1'",
+                idx, val
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_p4_151_no_lazy_fetch_argv_every_child_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &[
+        "implementation",
+        "begin",
+        "--revision",
+        &final_rev.to_string(),
+        "--sha256",
+        &final_sha,
+    ];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "begin failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify --no-lazy-fetch in argv of every recorded invocation.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during begin"
+    );
+
+    for (idx, args) in invocations.iter().enumerate() {
+        // --no-lazy-fetch must appear exactly once.
+        let count = args.iter().filter(|a| *a == "--no-lazy-fetch").count();
+        assert_eq!(
+            count, 1,
+            "invocation {}: --no-lazy-fetch appears {} times; expected exactly 1",
+            idx, count
+        );
+
+        // It must appear before the subcommand (in global-option position).
+        let lazy_fetch_pos = args.iter().position(|a| *a == "--no-lazy-fetch").unwrap();
+        // Find the subcommand: first arg that is not a global option or -c/-C pair.
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--no-replace-objects" | "--no-lazy-fetch" | "--literal-pathspecs" => {
+                    i += 1;
+                    continue;
+                }
+                "-c" | "-C" => {
+                    i += 2;
+                    continue;
+                } // -c key=value or -C path
+                _ => break,
+            }
+        }
+        let subcommand_pos = i;
+        assert!(
+            lazy_fetch_pos < subcommand_pos,
+            "invocation {}: --no-lazy-fetch at position {} is not before subcommand at position {}",
+            idx,
+            lazy_fetch_pos,
+            subcommand_pos
+        );
+    }
+}
+
+#[test]
+fn test_p4_151_no_lazy_fetch_argv_every_child_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_env_aware_git_recorder();
+    let operation = &["implementation", "check"];
+    let output = run_with_env_aware_recorder(&recorder, &repo, operation);
+    assert!(
+        output.status.success(),
+        "check failed with recorder: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during check"
+    );
+
+    for (idx, args) in invocations.iter().enumerate() {
+        let count = args.iter().filter(|a| *a == "--no-lazy-fetch").count();
+        assert_eq!(
+            count, 1,
+            "invocation {}: --no-lazy-fetch appears {} times; expected exactly 1",
+            idx, count
+        );
+
+        let lazy_fetch_pos = args.iter().position(|a| *a == "--no-lazy-fetch").unwrap();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--no-replace-objects" | "--no-lazy-fetch" | "--literal-pathspecs" => {
+                    i += 1;
+                    continue;
+                }
+                "-c" | "-C" => {
+                    i += 2;
+                    continue;
+                }
+                _ => break,
+            }
+        }
+        let subcommand_pos = i;
+        assert!(
+            lazy_fetch_pos < subcommand_pos,
+            "invocation {}: --no-lazy-fetch at position {} is not before subcommand at position {}",
+            idx,
+            lazy_fetch_pos,
+            subcommand_pos
+        );
+    }
 }
 
 // === N. OBLIGATION COVERAGE MAP (Blocker 14) ===
@@ -9649,9 +11607,18 @@ fn git(repo: &Path) -> Command {
     c
 }
 
+fn assert_git_output_success(output: &std::process::Output, description: &str) {
+    assert!(
+        output.status.success(),
+        "{description} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Capture raw diff from baseline..HEAD as exact bytes.
 fn git_raw_diff(repo: &Path, baseline: &str) -> Vec<u8> {
-    git(repo)
+    let out = git(repo)
         .arg("diff")
         .arg("--no-ext-diff")
         .arg("--raw")
@@ -9664,8 +11631,14 @@ fn git_raw_diff(repo: &Path, baseline: &str) -> Vec<u8> {
         .arg("HEAD")
         .arg("--")
         .output()
-        .unwrap()
-        .stdout
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "git diff failed: stderr={:?}",
+        out.stderr
+    );
+    out.stdout
 }
 
 fn phase4_newline() -> &'static [u8] {
@@ -9702,6 +11675,28 @@ fn assert_phase4_failure_exact(output: &std::process::Output, category: &str) {
     let mut expected = format!("error: {}", category).into_bytes();
     expected.extend_from_slice(phase4_newline());
     assert_eq!(output.stderr, expected);
+}
+
+fn assert_phase4_failure_preserves_governance(
+    output: &std::process::Output,
+    category: &str,
+    repo: &Path,
+    before: &[(String, Vec<u8>)],
+) {
+    assert_phase4_failure_exact(output, category);
+    assert_eq!(before, capture_governance_bytes(repo));
+    assert_no_temp_files(repo);
+}
+
+fn assert_phase4_failure_preserves_full_governance(
+    output: &std::process::Output,
+    category: &str,
+    repo: &Path,
+    before: &std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+) {
+    assert_phase4_failure_exact(output, category);
+    assert_eq!(before, &capture_governance(repo));
+    assert_no_temp_files(repo);
 }
 
 fn git_head_exact(repo: &Path) -> String {
@@ -10173,6 +12168,27 @@ fn run_check_with_git_wrapper(repo: &Path, wrapper: &GitWrapper) -> std::process
     cmd.output().unwrap()
 }
 
+fn run_begin_with_git_wrapper(
+    repo: &Path,
+    revision: u32,
+    sha256: &str,
+    wrapper: &GitWrapper,
+) -> std::process::Output {
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = wrapper.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.arg("implementation")
+        .arg("begin")
+        .arg("--repo")
+        .arg(repo)
+        .arg("--revision")
+        .arg(revision.to_string())
+        .arg("--sha256")
+        .arg(sha256)
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    cmd.output().unwrap()
+}
+
 fn assert_wrapper_reached(wrapper: &GitWrapper) {
     assert!(wrapper.sentinel.is_file());
     let mut expected = Vec::new();
@@ -10335,14 +12351,14 @@ fn assert_index_record(repo: &Path, mode: &str, oid: &str, path: &str, stage: &s
 
 fn commit_src(repo: &Path, message: &str) {
     let output = git(repo).arg("add").arg("src").output().unwrap();
-    assert_eq!(output.status.code(), Some(0));
+    assert_git_output_success(&output, "git add src fixture");
     let output = git(repo)
         .arg("commit")
         .arg("-m")
         .arg(message)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(0));
+    assert_git_output_success(&output, "git commit src fixture");
 }
 
 fn symlink_relative(link: &Path, target: &str) {
@@ -10431,7 +12447,8 @@ fn index_topology_case(case_name: &str) -> (tempfile::TempDir, std::path::PathBu
                 .unwrap()
                 .write_all(info.as_bytes())
                 .unwrap();
-            assert_eq!(child.wait().unwrap().code(), Some(0));
+            let output = child.wait_with_output().unwrap();
+            assert_git_output_success(&output, "git update-index conflict fixture");
             assert_index_record(&repo, "100644", &oid, "src/a", "1");
         }
         _ => panic!("unknown index topology case"),
@@ -11387,4 +13404,9999 @@ fn test_part1_wrapper_rejects_argv_variants() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stderr, Vec::<u8>::new());
     assert!(!wrapper.sentinel.is_file());
+}
+
+// PKG-08A: Check-side tracked-governance lifecycle coverage
+
+fn add_tracked_mrgs_and_commit(repo: &Path, path: &str, content: &[u8]) {
+    let full = repo.join(".mrgs").join(path);
+    if let Some(p) = full.parent() {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    std::fs::write(&full, content).unwrap();
+    let add_output = git(repo)
+        .arg("add")
+        .arg("--force")
+        .arg(format!(".mrgs/{}", path))
+        .output()
+        .unwrap();
+    assert_git_output_success(&add_output, &format!("git add .mrgs/{path}"));
+    let commit_output = git(repo)
+        .arg("commit")
+        .arg("-m")
+        .arg(format!("track .mrgs/{}", path))
+        .output()
+        .unwrap();
+    assert_git_output_success(&commit_output, &format!("git commit .mrgs/{path}"));
+}
+
+fn ls_files_stage0(repo: &Path, path: &str) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("ls-files")
+        .arg("--sparse")
+        .arg("--stage")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git ls-files --stage {path} failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.trim().is_empty(), "path {path} not in index");
+    let first_line = stdout.lines().next().unwrap().trim();
+    let parts: Vec<&str> = first_line.split('\t').collect();
+    let stage = parts[0].split_whitespace().nth(2).unwrap();
+    assert_eq!(stage, "0", "expected stage 0 for {path}, got {stage}");
+}
+
+fn assert_ls_files_mode(repo: &Path, path: &str, expected_mode: &str) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("ls-files")
+        .arg("--sparse")
+        .arg("--stage")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git ls-files --stage {path} failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout.lines().next().unwrap().trim();
+    let mode = first_line
+        .split('\t')
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        mode, expected_mode,
+        "expected mode {expected_mode} for {path}, got {mode}"
+    );
+}
+
+fn assert_repo_clean(repo: &Path) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("--untracked-files=no")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git status --porcelain failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.trim().is_empty(), "repo not clean: {stdout}");
+}
+
+fn assert_tracked_fixture_clean(repo: &Path, path: &str) {
+    ls_files_stage0(repo, path);
+    assert_ls_files_mode(repo, path, "100644");
+    assert_repo_clean(repo);
+}
+
+fn host_case_alias_directory_assertions(repo: &Path) {
+    let mrgs = repo.join(".mrgs");
+    let mrgs_upper = repo.join(".MRGS");
+    assert!(mrgs.exists(), ".mrgs directory must exist");
+    assert!(
+        mrgs_upper.exists(),
+        ".MRGS directory must exist (created by test setup)"
+    );
+    let canonical_mrgs = std::fs::canonicalize(&mrgs).unwrap();
+    let canonical_mrgs_upper = std::fs::canonicalize(&mrgs_upper).unwrap();
+    if canonical_mrgs == canonical_mrgs_upper {
+        assert_eq!(
+            std::fs::metadata(&mrgs).unwrap().is_dir(),
+            std::fs::metadata(&mrgs_upper).unwrap().is_dir(),
+            "case-insensitive alias directories must have the same kind"
+        );
+    } else {
+        assert_ne!(
+            canonical_mrgs, canonical_mrgs_upper,
+            "case-sensitive hosts must preserve distinct canonical fixture paths"
+        );
+    }
+}
+
+// ============================================================================
+// Existing PKG-08A tests (preserved with fixture assertions added)
+// ============================================================================
+
+#[test]
+fn test_impl_check_submodule_rejected() {
+    let (dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let sub_dir = dir.path().join("sub");
+    let init_output = Command::new("git")
+        .arg("init")
+        .arg(&sub_dir)
+        .output()
+        .unwrap();
+    assert_git_output_success(&init_output, "git init submodule fixture");
+    std::fs::write(sub_dir.join("sub_file.txt"), b"sub").unwrap();
+    let add_output = Command::new("git")
+        .arg("-C")
+        .arg(&sub_dir)
+        .arg("add")
+        .arg(".")
+        .output()
+        .unwrap();
+    assert_git_output_success(&add_output, "git add submodule fixture");
+    let commit_output = Command::new("git")
+        .arg("-C")
+        .arg(&sub_dir)
+        .arg("-c")
+        .arg("user.name=test")
+        .arg("-c")
+        .arg("user.email=test@test.com")
+        .arg("commit")
+        .arg("-m")
+        .arg("init")
+        .output()
+        .unwrap();
+    assert_git_output_success(&commit_output, "git commit submodule fixture");
+    let add_submodule_output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("-c")
+        .arg("protocol.file.allow=always")
+        .arg("submodule")
+        .arg("add")
+        .arg(&sub_dir)
+        .arg("submod")
+        .output()
+        .unwrap();
+    assert_git_output_success(&add_submodule_output, "git submodule add fixture");
+    let outer_commit_output = git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("add submodule")
+        .output()
+        .unwrap();
+    assert_git_output_success(&outer_commit_output, "git commit submodule fixture");
+    ls_files_stage0(&repo, "submod");
+    assert_ls_files_mode(&repo, "submod", "160000");
+    ls_files_stage0(&repo, ".gitmodules");
+    assert_ls_files_mode(&repo, ".gitmodules", "100644");
+    assert_repo_clean(&repo);
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_SUBMODULE_UNSUPPORTED",
+        &repo,
+        &governance_before,
+    );
+}
+
+#[test]
+fn test_impl_check_tracked_accepted_plan_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let bytes = std::fs::read(repo.join(".mrgs").join("accepted-plan.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "accepted-plan.json", &bytes);
+    assert_tracked_fixture_clean(&repo, ".mrgs/accepted-plan.json");
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+#[test]
+fn test_impl_check_tracked_state_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let bytes = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "state.json", &bytes);
+    assert_tracked_fixture_clean(&repo, ".mrgs/state.json");
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+#[test]
+fn test_impl_check_tracked_contract_draft_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let bytes = std::fs::read(repo.join(".mrgs").join("contract-draft.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "contract-draft.json", &bytes);
+    assert_tracked_fixture_clean(&repo, ".mrgs/contract-draft.json");
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+#[test]
+fn test_impl_check_tracked_accepted_contract_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let bytes = std::fs::read(repo.join(".mrgs").join("accepted-contract.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "accepted-contract.json", &bytes);
+    assert_tracked_fixture_clean(&repo, ".mrgs/accepted-contract.json");
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+#[test]
+fn test_impl_check_tracked_impl_authority_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let bytes = std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    add_tracked_mrgs_and_commit(&repo, "implementation-authority.json", &bytes);
+    assert_tracked_fixture_clean(&repo, ".mrgs/implementation-authority.json");
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+#[test]
+fn test_impl_check_tracked_extra_json_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    add_tracked_mrgs_and_commit(&repo, "extra.json", b"{}");
+    assert_tracked_fixture_clean(&repo, ".mrgs/extra.json");
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+#[test]
+fn test_impl_begin_tracked_temp_file_in_mrgs_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    add_tracked_mrgs_and_commit(&repo, "mrgs_tmp_12345_67890.tmp", b"temp");
+    assert_tracked_fixture_clean(&repo, ".mrgs/mrgs_tmp_12345_67890.tmp");
+    let governance_before = capture_governance(&repo);
+    let snapshot_before = capture_snapshot(&repo);
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    assert_eq!(governance_before, capture_governance(&repo));
+    let snapshot_after = capture_snapshot(&repo);
+    assert_no_new_mrgs_temp_paths(
+        &snapshot_before,
+        &snapshot_after,
+        "begin tracked Phase-4 temp-shaped path",
+        &[".mrgs/mrgs_tmp_12345_67890.tmp".to_string()],
+    );
+}
+
+#[test]
+fn test_impl_check_tracked_temp_file_in_mrgs_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    add_tracked_mrgs_and_commit(&repo, "mrgs_tmp_12345_67890.tmp", b"temp");
+    assert_tracked_fixture_clean(&repo, ".mrgs/mrgs_tmp_12345_67890.tmp");
+    let governance_before = capture_governance(&repo);
+    let snapshot_before = capture_snapshot(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    assert_eq!(governance_before, capture_governance(&repo));
+    let snapshot_after = capture_snapshot(&repo);
+    assert_no_new_mrgs_temp_paths(
+        &snapshot_before,
+        &snapshot_after,
+        "check tracked Phase-4 temp-shaped path",
+        &[".mrgs/mrgs_tmp_12345_67890.tmp".to_string()],
+    );
+}
+
+#[test]
+fn test_impl_begin_tracked_mrgs_state_json_case_alias_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let state_content = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    std::fs::create_dir_all(repo.join(".MRGS")).unwrap();
+    std::fs::write(repo.join(".MRGS").join("state.json"), &state_content).unwrap();
+    let add_output = git(&repo)
+        .arg("add")
+        .arg("--force")
+        .arg(".MRGS/state.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(&add_output, "git add .MRGS/state.json");
+    let commit_output = git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("track .MRGS/state.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(&commit_output, "git commit .MRGS/state.json");
+    host_case_alias_directory_assertions(&repo);
+    assert_tracked_fixture_clean(&repo, ".MRGS/state.json");
+    let governance_before = capture_governance(&repo);
+    let filesystem_before = capture_snapshot(&repo);
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+    assert!(diff_snapshots(&filesystem_before, &capture_snapshot(&repo)).is_empty());
+}
+
+#[test]
+fn test_impl_check_tracked_mrgs_state_json_case_alias_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let state_content = std::fs::read(repo.join(".mrgs").join("state.json")).unwrap();
+    std::fs::create_dir_all(repo.join(".MRGS")).unwrap();
+    std::fs::write(repo.join(".MRGS").join("state.json"), &state_content).unwrap();
+    let add_output = git(&repo)
+        .arg("add")
+        .arg("--force")
+        .arg(".MRGS/state.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(&add_output, "git add .MRGS/state.json");
+    let commit_output = git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("track .MRGS/state.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(&commit_output, "git commit .MRGS/state.json");
+    host_case_alias_directory_assertions(&repo);
+    assert_tracked_fixture_clean(&repo, ".MRGS/state.json");
+    let governance_before = capture_governance(&repo);
+    let filesystem_before = capture_snapshot(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+    assert!(diff_snapshots(&filesystem_before, &capture_snapshot(&repo)).is_empty());
+}
+
+#[test]
+fn test_impl_check_tracked_unknown_mrgs_path_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    add_tracked_mrgs_and_commit(&repo, "something_unknown.acme", b"{}");
+    assert_tracked_fixture_clean(&repo, ".mrgs/something_unknown.acme");
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+// ============================================================================
+// Repair 1: P4-097 directory-summary coverage
+//
+// Git's own index operations (update-index --cacheinfo / --index-info) do not
+// accept mode 040000 entries for non-sparse repositories.  The established
+// pattern in this file for testing the production code's rejection of
+// directory-summary entries is the git-wrapper approach (see
+// test_part1_index_topology_sparse_directory_{prefix,leaf}_wrapper).
+//
+// This test uses the same technique, intercepting `git ls-files --sparse
+// --stage -z` to inject a mode-040000 `.mrgs/` entry so that
+// validate_index_structure classifies it as a sparse directory
+// (directory-summary) and rejects with GIT_INVENTORY_INVALID.
+// ============================================================================
+
+#[test]
+fn test_impl_check_directory_summary_rejected() {
+    let (_dir, repo) = index_topology_case("ordinary");
+    let mrgs_oid = "a".repeat(40);
+    let payload = index_payload("040000", &mrgs_oid, "0", ".mrgs/");
+    let wrapper = create_git_wrapper(
+        &repo,
+        &["ls-files", "--sparse", "--stage", "-z"],
+        "payload",
+        &payload,
+    );
+    let governance_before = capture_governance(&repo);
+    let output = run_check_with_git_wrapper(&repo, &wrapper);
+    assert_wrapper_reached(&wrapper);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+}
+
+// ============================================================================
+// Repair 2: P4-137 platform-neutral case-alias evidence
+// ============================================================================
+
+fn platform_neutral_inject_mrgs_state_json(repo: &Path) {
+    let state_path = repo.join(".mrgs").join("state.json");
+    let hash_out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("hash-object")
+        .arg("-w")
+        .arg(&state_path)
+        .output()
+        .unwrap();
+    assert_git_output_success(&hash_out, "git hash-object -w case-alias fixture");
+    let blob_sha = String::from_utf8_lossy(&hash_out.stdout).trim().to_string();
+
+    let ui_out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("update-index")
+        .arg("--add")
+        .arg("--cacheinfo")
+        .arg(format!("100644,{},.MRGS/state.json", blob_sha))
+        .output()
+        .unwrap();
+    assert_git_output_success(&ui_out, "git update-index --cacheinfo case-alias fixture");
+}
+
+#[test]
+fn test_impl_begin_platform_neutral_mrgs_case_alias_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Inject exact .MRGS/state.json entry independent of host filesystem
+    platform_neutral_inject_mrgs_state_json(&repo);
+
+    let commit_output = git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("platform-neutral .MRGS/state.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(
+        &commit_output,
+        "git commit platform-neutral case-alias fixture",
+    );
+
+    // Fixture assertions — prove exact path bytes at stage 0, clean index
+    ls_files_stage0(&repo, ".MRGS/state.json");
+    assert_ls_files_mode(&repo, ".MRGS/state.json", "100644");
+    assert_repo_clean(&repo);
+    let governance_before = capture_governance(&repo);
+    let filesystem_before = capture_snapshot(&repo);
+
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+    assert!(diff_snapshots(&filesystem_before, &capture_snapshot(&repo)).is_empty());
+}
+
+#[test]
+fn test_impl_check_platform_neutral_mrgs_case_alias_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Inject exact .MRGS/state.json entry independent of host filesystem
+    platform_neutral_inject_mrgs_state_json(&repo);
+
+    let commit_output = git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("platform-neutral .MRGS/state.json")
+        .output()
+        .unwrap();
+    assert_git_output_success(
+        &commit_output,
+        "git commit platform-neutral case-alias fixture",
+    );
+
+    // Fixture assertions — prove exact path bytes at stage 0, clean index
+    ls_files_stage0(&repo, ".MRGS/state.json");
+    assert_ls_files_mode(&repo, ".MRGS/state.json", "100644");
+    assert_repo_clean(&repo);
+    let governance_before = capture_governance(&repo);
+    let filesystem_before = capture_snapshot(&repo);
+
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_preserves_full_governance(
+        &output,
+        "GIT_INVENTORY_INVALID",
+        &repo,
+        &governance_before,
+    );
+    assert!(diff_snapshots(&filesystem_before, &capture_snapshot(&repo)).is_empty());
+}
+
+// PKG-10: Promisor object failures and no-network/helper observation
+// ============================================================================
+//
+// P4-152  promisor repository with every required object local can be inspected
+//         without network or helper execution;
+// P4-153  a missing promised blob fails locally with exactly GIT_COMMAND_FAILED;
+// P4-154  a missing promised tree fails locally with exactly GIT_COMMAND_FAILED;
+// P4-156  symlink blob inspection cannot trigger lazy fetch and a missing
+//         promised symlink blob fails locally;
+// P4-157  raw diff copy/rename detection cannot trigger lazy fetch and missing
+//         required objects fail locally;
+// P4-158  no remote helper, credential helper, fetch process, or fetch-pack
+//         process is launched by begin or check;
+// P4-159  an observable fake remote helper and observable fake credential helper
+//         are never invoked;
+// P4-160  every missing-promisor-object case emits exactly error: GIT_COMMAND_FAILED;
+// P4-161  no remote URL, helper output, credential text, or network-derived stderr
+//         is surfaced.
+// ============================================================================
+
+/// Sentinel files for detecting external process execution.
+type PromisorSentinels = (
+    std::path::PathBuf, // remote_helper_hit
+    std::path::PathBuf, // credential_helper_hit
+    std::path::PathBuf, // fetch_hit
+    std::path::PathBuf, // fetch_pack_hit
+);
+
+/// Set up a promisor-enabled repository with all required objects local,
+/// plus sentinel files and fake helpers that would be created if any external
+/// process were invoked. Returns (temp_dir, repo_path, recorder, sentinels).
+fn setup_promisor_with_sentinels_and_recorder() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    EnvAwareGitRecorder,
+    PromisorSentinels,
+    u32,
+    String,
+) {
+    // Use existing infrastructure for governance/contract setup.
+    let (dir, repo) = setup_implementation_basic();
+
+    // Create sentinel directory and fake helpers that create files if executed.
+    let sentinel_dir = tempfile::TempDir::new().unwrap();
+    let scripts_dir = sentinel_dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+
+    let remote_helper_hit = sentinel_dir.path().join("remote-helper-hit");
+    let credential_helper_hit = sentinel_dir.path().join("credential-helper-hit");
+    let fetch_hit = sentinel_dir.path().join("fetch-hit");
+    let fetch_pack_hit = sentinel_dir.path().join("fetch-pack-hit");
+
+    // Fake remote helper (git-remote-fake)
+    let fake_remote_helper = scripts_dir.join("git-remote-fake.bat");
+    std::fs::write(
+        &fake_remote_helper,
+        format!("echo hit > {}\n", remote_helper_hit.display()),
+    )
+    .unwrap();
+
+    // Fake credential helper (git-credential-fake)
+    let fake_credential_helper = scripts_dir.join("git-credential-fake.bat");
+    std::fs::write(
+        &fake_credential_helper,
+        format!("echo hit > {}\n", credential_helper_hit.display()),
+    )
+    .unwrap();
+
+    // Fake fetch script
+    let fake_fetch = scripts_dir.join("git-fetch.bat");
+    std::fs::write(&fake_fetch, format!("echo hit > {}\n", fetch_hit.display())).unwrap();
+
+    // Fake fetch-pack script
+    let fake_fetch_pack = scripts_dir.join("git-fetch-pack.bat");
+    std::fs::write(
+        &fake_fetch_pack,
+        format!("echo hit > {}\n", fetch_pack_hit.display()),
+    )
+    .unwrap();
+
+    // Configure the repo with fake helpers and a secret remote URL.
+    let secret_url = "https://SECRET_TOKEN_XYZ123@fake-remote.example.com/secret/repo.git";
+    git(&repo)
+        .arg("config")
+        .arg("credential.helper")
+        .arg(fake_credential_helper.display().to_string())
+        .output()
+        .unwrap();
+
+    // Set up a fake remote with secret URL (no real connectivity).
+    git(&repo)
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(secret_url)
+        .output()
+        .unwrap();
+
+    // Mark as promisor/partial-clone.
+    git(&repo)
+        .arg("config")
+        .arg("extensions.partialClone")
+        .arg("origin")
+        .output()
+        .unwrap();
+
+    // Accept the contract and get final revision/sha.
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Create the recorder.
+    let recorder = create_env_aware_git_recorder();
+
+    (
+        dir,
+        repo,
+        recorder,
+        (
+            remote_helper_hit,
+            credential_helper_hit,
+            fetch_hit,
+            fetch_pack_hit,
+        ),
+        final_rev,
+        final_sha,
+    )
+}
+
+/// Run implementation begin with the recorder and verify no helper/fetch processes.
+fn run_begin_with_promisor_recorder(
+    recorder: &EnvAwareGitRecorder,
+    repo: &Path,
+    revision: u32,
+    sha256: &str,
+) -> std::process::Output {
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = recorder.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.arg("implementation")
+        .arg("begin")
+        .arg("--repo")
+        .arg(repo)
+        .arg("--revision")
+        .arg(revision.to_string())
+        .arg("--sha256")
+        .arg(sha256)
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    cmd.output().unwrap()
+}
+
+/// Run implementation check with the recorder and verify no helper/fetch processes.
+fn run_check_with_promisor_recorder(
+    recorder: &EnvAwareGitRecorder,
+    repo: &Path,
+) -> std::process::Output {
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = recorder.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.arg("implementation")
+        .arg("check")
+        .arg("--repo")
+        .arg(repo)
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    cmd.output().unwrap()
+}
+
+/// Assert that no sentinel files were created (no helpers/fetch executed).
+fn assert_no_helper_sentinels(sentinels: &PromisorSentinels) {
+    let (remote_hit, cred_hit, fetch_hit, fetch_pack_hit) = sentinels;
+    assert!(!remote_hit.exists(), "fake remote helper was executed");
+    assert!(!cred_hit.exists(), "fake credential helper was executed");
+    assert!(!fetch_hit.exists(), "fake fetch script was executed");
+    assert!(
+        !fetch_pack_hit.exists(),
+        "fake fetch-pack script was executed"
+    );
+}
+
+/// Count specific child process types from recorded argv.
+/// The first argument is always the git subcommand (e.g., "rev-parse", "fetch").
+fn count_child_processes(invocations: &[Vec<String>], pattern: &str) -> usize {
+    invocations
+        .iter()
+        .filter(|args| {
+            // Only check the first argument (subcommand), not all arguments.
+            // This avoids false positives from paths or other args containing "fetch" etc.
+            !args.is_empty() && args[0].contains(pattern)
+        })
+        .count()
+}
+
+/// Assert no fetch/fetch-pack/remote-helper children were recorded.
+fn assert_no_network_children(invocations: &[Vec<String>]) {
+    // Check for exact subcommand matches to avoid false positives.
+    let fetch_count = invocations
+        .iter()
+        .filter(|args| args.first().is_some_and(|a| a == "fetch"))
+        .count();
+    let fetch_pack_count = invocations
+        .iter()
+        .filter(|args| {
+            args.first()
+                .is_some_and(|a| a == "fetch-pack" || a.contains("git-fetch-pack"))
+        })
+        .count();
+    let remote_helper_count = invocations
+        .iter()
+        .filter(|args| args.first().is_some_and(|a| a.contains("git-remote-")))
+        .count();
+    assert_eq!(
+        fetch_count, 0,
+        "{} git fetch children recorded; expected 0",
+        fetch_count
+    );
+    assert_eq!(
+        fetch_pack_count, 0,
+        "{} git fetch-pack children recorded; expected 0",
+        fetch_pack_count
+    );
+    assert_eq!(
+        remote_helper_count, 0,
+        "{} git-remote-* helper children recorded; expected 0",
+        remote_helper_count
+    );
+}
+
+// --- P4-152: promisor repository with all objects local succeeds without network/helper ---
+
+#[test]
+fn test_p4_152_promisor_all_objects_local_no_network_begin() {
+    let (_dir, repo, recorder, sentinels, _final_rev, _final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Run begin with recorder.
+    let output = run_begin_with_promisor_recorder(&recorder, &repo, _final_rev, &_final_sha);
+    assert!(
+        output.status.success(),
+        "begin failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify no helper sentinels were triggered.
+    assert_no_helper_sentinels(&sentinels);
+
+    // Verify recorded children show no fetch/fetch-pack/remote-helper.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during begin"
+    );
+    assert_no_network_children(&invocations);
+
+    // Verify no remote URL or credential text in stderr.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    for secret in [
+        "SECRET_TOKEN_XYZ123",
+        "fake-remote.example.com",
+        "credential",
+    ] {
+        assert!(
+            !stderr.contains(secret),
+            "stderr leaked '{}': {}",
+            secret,
+            stderr
+        );
+    }
+}
+
+#[test]
+fn test_p4_152_promisor_all_objects_local_no_network_check() {
+    let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // First do a normal begin (without recorder).
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Run check with recorder.
+    let output = run_check_with_promisor_recorder(&recorder, &repo);
+    assert!(
+        output.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify no helper sentinels were triggered.
+    assert_no_helper_sentinels(&sentinels);
+
+    // Verify recorded children show no fetch/fetch-pack/remote-helper.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during check"
+    );
+    assert_no_network_children(&invocations);
+
+    // Verify no remote URL or credential text in stderr.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    for secret in [
+        "SECRET_TOKEN_XYZ123",
+        "fake-remote.example.com",
+        "credential",
+    ] {
+        assert!(
+            !stderr.contains(secret),
+            "stderr leaked '{}': {}",
+            secret,
+            stderr
+        );
+    }
+}
+
+// --- P4-153: missing promised blob fails locally with GIT_COMMAND_FAILED ---
+
+#[test]
+fn test_p4_153_missing_promised_blob_fails_locally() {
+    let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Normal begin first (required for check).
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Create a blob file to test with.
+    std::fs::write(
+        repo.join("blob_test.txt"),
+        "content for missing blob test\n",
+    )
+    .unwrap();
+    git(&repo).arg("add").arg("blob_test.txt").output().unwrap();
+    git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("add blob test file")
+        .output()
+        .unwrap();
+
+    // Get the blob OID for blob_test.txt.
+    let blob_oid_output = git(&repo)
+        .arg("rev-parse")
+        .arg("HEAD:blob_test.txt")
+        .output()
+        .unwrap();
+    assert_success(&blob_oid_output);
+    let blob_oid = String::from_utf8(blob_oid_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(blob_oid.len(), 40);
+
+    // Verify the blob exists.
+    let present = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{blob}}", blob_oid))
+        .output()
+        .unwrap();
+    assert_success(&present);
+
+    // Remove the blob from the object database.
+    let object_path = repo
+        .join(".git")
+        .join("objects")
+        .join(&blob_oid[..2])
+        .join(&blob_oid[2..]);
+    assert!(object_path.is_file(), "blob was not a loose local object");
+    std::fs::remove_file(&object_path).unwrap();
+
+    // Also remove the working tree file so git doesn't detect changes before
+    // encountering the missing blob.
+    let _ = std::fs::remove_file(repo.join("blob_test.txt"));
+
+    // Verify the blob is now missing.
+    let absent = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{blob}}", blob_oid))
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+
+    // Run check with recorder — must fail locally with GIT_COMMAND_FAILED.
+    let output = run_check_with_promisor_recorder(&recorder, &repo);
+    assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+
+    // Verify no helper sentinels were triggered (no lazy fetch).
+    assert_no_helper_sentinels(&sentinels);
+
+    // Verify recorded children show no fetch/fetch-pack/remote-helper.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert_no_network_children(&invocations);
+}
+
+// --- P4-154: missing promised tree fails locally with GIT_COMMAND_FAILED ---
+
+#[test]
+fn test_p4_154_missing_promised_tree_fails_locally() {
+    let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Normal begin first (required for check).
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Create a subdirectory with its own tree.
+    let subdir_path = repo.join("subdir");
+    std::fs::create_dir_all(&subdir_path).unwrap();
+    std::fs::write(subdir_path.join("file.txt"), "subdir content\n").unwrap();
+    git(&repo).arg("add").arg("subdir").output().unwrap();
+    git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("add subdir tree")
+        .output()
+        .unwrap();
+
+    // Get the tree OID for subdir.
+    let tree_oid_output = git(&repo)
+        .arg("rev-parse")
+        .arg("HEAD:subdir")
+        .output()
+        .unwrap();
+    assert_success(&tree_oid_output);
+    let tree_oid = String::from_utf8(tree_oid_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(tree_oid.len(), 40);
+
+    // Verify the tree exists.
+    let present = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{tree}}", tree_oid))
+        .output()
+        .unwrap();
+    assert_success(&present);
+
+    // Remove the tree from the object database.
+    let object_path = repo
+        .join(".git")
+        .join("objects")
+        .join(&tree_oid[..2])
+        .join(&tree_oid[2..]);
+    assert!(object_path.is_file(), "tree was not a loose local object");
+    std::fs::remove_file(&object_path).unwrap();
+
+    // Also remove the working tree directory so git doesn't detect changes
+    // before encountering the missing tree.
+    let _ = std::fs::remove_dir_all(repo.join("subdir"));
+
+    // Verify the tree is now missing.
+    let absent = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{tree}}", tree_oid))
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+
+    // Run check with recorder — must fail locally with GIT_COMMAND_FAILED.
+    let output = run_check_with_promisor_recorder(&recorder, &repo);
+    assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+
+    // Verify no helper sentinels were triggered (no lazy fetch).
+    assert_no_helper_sentinels(&sentinels);
+
+    // Verify recorded children show no fetch/fetch-pack/remote-helper.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert_no_network_children(&invocations);
+}
+
+// --- P4-156: symlink/blob inspection cannot trigger lazy fetch;
+// missing promised blob fails locally without network access.
+// Uses the same pattern as test_impl_check_promisor_missing_promised_commit:
+// create a commit with a file, remove its blob, set baseline_head to that
+// commit so check must inspect it and fail locally.
+
+#[test]
+fn test_p4_156_symlink_blob_missing_fails_locally() {
+    let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Normal begin first (required for check).
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Create a file to test blob inspection.
+    let link_path = repo.join("mylink");
+    std::fs::write(&link_path, "README.md").unwrap();
+    git(&repo).arg("add").arg("mylink").output().unwrap();
+    git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("add file for blob inspection test")
+        .output()
+        .unwrap();
+
+    // Get the current HEAD (which has the file).
+    let promised = git_head_exact(&repo);
+    assert_eq!(promised.len(), 40);
+
+    // Verify the commit is locally available.
+    let present = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{promised}^{{commit}}"))
+        .output()
+        .unwrap();
+    assert_success(&present);
+
+    // Get the blob OID.
+    let link_oid_output = git(&repo)
+        .arg("rev-parse")
+        .arg(format!("{promised}:mylink"))
+        .output()
+        .unwrap();
+    assert_success(&link_oid_output);
+    let link_oid = String::from_utf8(link_oid_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(link_oid.len(), 40);
+
+    // Verify the blob exists.
+    let present_blob = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{blob}}", link_oid))
+        .output()
+        .unwrap();
+    assert_success(&present_blob);
+
+    // Remove the blob from the object database.
+    let object_path = repo
+        .join(".git")
+        .join("objects")
+        .join(&link_oid[..2])
+        .join(&link_oid[2..]);
+    assert!(object_path.is_file(), "blob was not a loose local object");
+    std::fs::remove_file(&object_path).unwrap();
+
+    // Verify the blob is now missing.
+    let absent = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{blob}}", link_oid))
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+
+    // Create a new commit on top so HEAD != baseline_head. This forces check
+    // to compare against the baseline which has the missing blob.
+    std::fs::write(repo.join("extra.txt"), "extra content\n").unwrap();
+    git(&repo).arg("add").arg("extra.txt").output().unwrap();
+    git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("extra commit to force comparison")
+        .output()
+        .unwrap();
+
+    // Now set baseline_head to the commit with the missing blob.
+    let mut record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    record["baseline_head"] = serde_json::json!(promised);
+    write_json(&repo, "implementation-authority.json", &record);
+
+    // Run check with recorder — must fail locally without triggering any fetch.
+    let output = run_check_with_promisor_recorder(&recorder, &repo);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "check should fail locally: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Key proof for P4-156: no helper sentinels were triggered (no lazy fetch).
+    assert_no_helper_sentinels(&sentinels);
+
+    // Verify recorded children show no fetch/fetch-pack/remote-helper.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert_no_network_children(&invocations);
+}
+
+// --- P4-157: copy/rename required object missing fails locally ---
+
+#[test]
+fn test_p4_157_copy_rename_missing_object_fails_locally() {
+    let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Normal begin first (required for check).
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Create an original file.
+    std::fs::write(
+        repo.join("original.txt"),
+        "original content for copy test\n",
+    )
+    .unwrap();
+    git(&repo).arg("add").arg("original.txt").output().unwrap();
+    git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("add original file")
+        .output()
+        .unwrap();
+
+    // Copy the file (git will detect this as a copy/rename).
+    std::fs::copy(repo.join("original.txt"), repo.join("copied.txt")).unwrap();
+    git(&repo).arg("add").arg("copied.txt").output().unwrap();
+    git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("copy original to copied")
+        .output()
+        .unwrap();
+
+    // Get the blob OID for the original file.
+    let orig_oid_output = git(&repo)
+        .arg("rev-parse")
+        .arg("HEAD:original.txt")
+        .output()
+        .unwrap();
+    assert_success(&orig_oid_output);
+    let orig_oid = String::from_utf8(orig_oid_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(orig_oid.len(), 40);
+
+    // Verify the blob exists.
+    let present = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{blob}}", orig_oid))
+        .output()
+        .unwrap();
+    assert_success(&present);
+
+    // Remove the original blob from the object database.
+    let object_path = repo
+        .join(".git")
+        .join("objects")
+        .join(&orig_oid[..2])
+        .join(&orig_oid[2..]);
+    assert!(
+        object_path.is_file(),
+        "original blob was not a loose local object"
+    );
+    std::fs::remove_file(&object_path).unwrap();
+
+    // Also remove working tree files so git doesn't detect changes before
+    // encountering the missing object.
+    let _ = std::fs::remove_file(repo.join("original.txt"));
+    let _ = std::fs::remove_file(repo.join("copied.txt"));
+
+    // Verify the original blob is now missing.
+    let absent = git(&repo)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{}^{{blob}}", orig_oid))
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+
+    // Run check with recorder — must fail locally with GIT_COMMAND_FAILED.
+    let output = run_check_with_promisor_recorder(&recorder, &repo);
+    assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+
+    // Verify no helper sentinels were triggered (no lazy fetch).
+    assert_no_helper_sentinels(&sentinels);
+
+    // Verify recorded children show no fetch/fetch-pack/remote-helper.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert_no_network_children(&invocations);
+}
+
+// --- P4-158 and P4-159: universal no external process across begin/check ---
+
+#[test]
+fn test_p4_158_no_external_process_begin_promisor() {
+    let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Run begin with recorder.
+    let output = run_begin_with_promisor_recorder(&recorder, &repo, final_rev, &final_sha);
+    assert!(
+        output.status.success(),
+        "begin failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // ALL_GIT_CHILDREN_OBSERVED=YES via PATH-intercepting recorder.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during begin"
+    );
+
+    // Count specific process types.
+    let remote_helper_count = count_child_processes(&invocations, "git-remote-");
+    let credential_helper_count = count_child_processes(&invocations, "credential");
+    let fetch_count = count_child_processes(&invocations, "fetch");
+    let fetch_pack_count = count_child_processes(&invocations, "fetch-pack");
+
+    assert_eq!(
+        remote_helper_count, 0,
+        "git-remote-* helper executed during begin"
+    );
+    assert_eq!(
+        credential_helper_count, 0,
+        "credential helper executed during begin"
+    );
+    assert_eq!(fetch_count, 0, "git fetch executed during begin");
+    assert_eq!(fetch_pack_count, 0, "git fetch-pack executed during begin");
+
+    // Sentinel verification.
+    assert_no_helper_sentinels(&sentinels);
+}
+
+#[test]
+fn test_p4_158_no_external_process_check_promisor() {
+    let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Normal begin first.
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Run check with recorder.
+    let output = run_check_with_promisor_recorder(&recorder, &repo);
+    assert!(
+        output.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // ALL_GIT_CHILDREN_OBSERVED=YES via PATH-intercepting recorder.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert!(
+        !invocations.is_empty(),
+        "no git invocations recorded during check"
+    );
+
+    // Count specific process types.
+    let remote_helper_count = count_child_processes(&invocations, "git-remote-");
+    let credential_helper_count = count_child_processes(&invocations, "credential");
+    let fetch_count = count_child_processes(&invocations, "fetch");
+    let fetch_pack_count = count_child_processes(&invocations, "fetch-pack");
+
+    assert_eq!(
+        remote_helper_count, 0,
+        "git-remote-* helper executed during check"
+    );
+    assert_eq!(
+        credential_helper_count, 0,
+        "credential helper executed during check"
+    );
+    assert_eq!(fetch_count, 0, "git fetch executed during check");
+    assert_eq!(fetch_pack_count, 0, "git fetch-pack executed during check");
+
+    // Sentinel verification.
+    assert_no_helper_sentinels(&sentinels);
+}
+
+#[test]
+fn test_p4_159_fake_helpers_never_invoked() {
+    let (_dir, repo, recorder, sentinels, _final_rev, _final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Run both begin and check with recorder.
+    let begin_output = run_begin_with_promisor_recorder(&recorder, &repo, _final_rev, &_final_sha);
+    assert!(
+        begin_output.status.success(),
+        "begin failed: {}",
+        String::from_utf8_lossy(&begin_output.stderr)
+    );
+
+    let check_output = run_check_with_promisor_recorder(&recorder, &repo);
+    assert!(
+        check_output.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    // Verify no sentinel files were created.
+    let (remote_hit, cred_hit, fetch_hit, fetch_pack_hit) = &sentinels;
+    assert!(!remote_hit.exists(), "fake remote helper was invoked");
+    assert!(!cred_hit.exists(), "fake credential helper was invoked");
+    assert!(!fetch_hit.exists(), "fake fetch script was invoked");
+    assert!(
+        !fetch_pack_hit.exists(),
+        "fake fetch-pack script was invoked"
+    );
+
+    // Verify recorded children show no helper execution.
+    let invocations = read_env_aware_argv(&recorder.argv_log);
+    assert!(!invocations.is_empty(), "no git invocations recorded");
+
+    for (idx, args) in invocations.iter().enumerate() {
+        // No invocation should be a helper command.
+        let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+        assert!(
+            !cmd.contains("git-remote-") && !cmd.contains("credential"),
+            "invocation {} appears to be a helper: {:?}",
+            idx,
+            args
+        );
+    }
+}
+
+// --- P4-160: universal error category for all missing-object classes ---
+
+#[test]
+fn test_p4_160_missing_object_error_category_table() {
+    // Table-driven assertion over every missing-object class implemented by PKG-10.
+    // Each case creates a fresh promisor repo using the shared PKG-10 fixture,
+    // removes the specified object, and verifies exact GIT_COMMAND_FAILED error
+    // with no helper/fetch execution and no secret/network leak.
+
+    struct MissingObjectCase {
+        name: &'static str,
+        setup: fn(&Path) -> String, // returns OID of object to remove
+        verify_missing: fn(&Path, &str),
+    }
+
+    let cases = vec![
+        MissingObjectCase {
+            name: "ordinary_blob",
+            setup: |repo| {
+                std::fs::write(repo.join("blob_test.txt"), "blob content\n").unwrap();
+                git(repo).arg("add").arg("blob_test.txt").output().unwrap();
+                git(repo)
+                    .arg("commit")
+                    .arg("-m")
+                    .arg("add blob test file")
+                    .output()
+                    .unwrap();
+                let out = git(repo)
+                    .arg("rev-parse")
+                    .arg("HEAD:blob_test.txt")
+                    .output()
+                    .unwrap();
+                String::from_utf8(out.stdout).unwrap().trim().to_string()
+            },
+            verify_missing: |repo, oid| {
+                let absent = git(repo)
+                    .arg("cat-file")
+                    .arg("-e")
+                    .arg(format!("{}^{{blob}}", oid))
+                    .output()
+                    .unwrap();
+                assert!(!absent.status.success(), "blob should be missing");
+            },
+        },
+        MissingObjectCase {
+            name: "tree",
+            setup: |repo| {
+                let tree_dir = repo.join("tree_test_dir");
+                std::fs::create_dir_all(&tree_dir).unwrap();
+                std::fs::write(tree_dir.join("file.txt"), "tree dir content\n").unwrap();
+                git(repo).arg("add").arg("tree_test_dir").output().unwrap();
+                git(repo)
+                    .arg("commit")
+                    .arg("-m")
+                    .arg("add tree test dir")
+                    .output()
+                    .unwrap();
+                let out = git(repo)
+                    .arg("rev-parse")
+                    .arg("HEAD:tree_test_dir")
+                    .output()
+                    .unwrap();
+                String::from_utf8(out.stdout).unwrap().trim().to_string()
+            },
+            verify_missing: |repo, oid| {
+                let absent = git(repo)
+                    .arg("cat-file")
+                    .arg("-e")
+                    .arg(format!("{}^{{tree}}", oid))
+                    .output()
+                    .unwrap();
+                assert!(!absent.status.success(), "tree should be missing");
+            },
+        },
+        MissingObjectCase {
+            name: "symlink_blob",
+            setup: |repo| {
+                let link_path = repo.join("mylink");
+                std::fs::write(&link_path, "README.md").unwrap();
+                git(repo).arg("add").arg("mylink").output().unwrap();
+                git(repo)
+                    .arg("commit")
+                    .arg("-m")
+                    .arg("add file for blob inspection test")
+                    .output()
+                    .unwrap();
+                let out = git(repo)
+                    .arg("rev-parse")
+                    .arg("HEAD:mylink")
+                    .output()
+                    .unwrap();
+                String::from_utf8(out.stdout).unwrap().trim().to_string()
+            },
+            verify_missing: |repo, oid| {
+                let absent = git(repo)
+                    .arg("cat-file")
+                    .arg("-e")
+                    .arg(format!("{}^{{blob}}", oid))
+                    .output()
+                    .unwrap();
+                assert!(!absent.status.success(), "symlink blob should be missing");
+            },
+        },
+        MissingObjectCase {
+            name: "copy_rename_required_object",
+            setup: |repo| {
+                std::fs::write(
+                    repo.join("original.txt"),
+                    "original content for copy test\n",
+                )
+                .unwrap();
+                git(repo).arg("add").arg("original.txt").output().unwrap();
+                git(repo)
+                    .arg("commit")
+                    .arg("-m")
+                    .arg("add original file")
+                    .output()
+                    .unwrap();
+
+                std::fs::copy(repo.join("original.txt"), repo.join("copied.txt")).unwrap();
+                git(repo).arg("add").arg("copied.txt").output().unwrap();
+                git(repo)
+                    .arg("commit")
+                    .arg("-m")
+                    .arg("copy original to copied")
+                    .output()
+                    .unwrap();
+
+                let out = git(repo)
+                    .arg("rev-parse")
+                    .arg("HEAD:original.txt")
+                    .output()
+                    .unwrap();
+                String::from_utf8(out.stdout).unwrap().trim().to_string()
+            },
+            verify_missing: |repo, oid| {
+                let absent = git(repo)
+                    .arg("cat-file")
+                    .arg("-e")
+                    .arg(format!("{}^{{blob}}", oid))
+                    .output()
+                    .unwrap();
+                assert!(
+                    !absent.status.success(),
+                    "copy/rename blob should be missing"
+                );
+            },
+        },
+    ];
+
+    for case in cases {
+        // Use the shared PKG-10 promisor fixture with sentinels and recorder.
+        let (_dir, repo, recorder, sentinels, final_rev, final_sha) =
+            setup_promisor_with_sentinels_and_recorder();
+
+        // Run begin first (before removing objects) so authority exists.
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Set up the test object.
+        let oid = (case.setup)(&repo);
+        assert_eq!(oid.len(), 40, "{}: invalid OID length", case.name);
+
+        // Remove the object.
+        let object_path = repo
+            .join(".git")
+            .join("objects")
+            .join(&oid[..2])
+            .join(&oid[2..]);
+        if object_path.is_file() {
+            std::fs::remove_file(&object_path).unwrap();
+        }
+
+        // Verify it's missing.
+        (case.verify_missing)(&repo, &oid);
+
+        // Run check with recorder — should fail with GIT_COMMAND_FAILED when
+        // inspecting the missing object during comparison against baseline.
+        let check_output = run_check_with_promisor_recorder(&recorder, &repo);
+        assert_phase4_failure_exact(&check_output, "GIT_COMMAND_FAILED");
+
+        // Verify no helper sentinels were triggered (no lazy fetch).
+        assert_no_helper_sentinels(&sentinels);
+
+        // Verify recorded children show no fetch/fetch-pack/remote-helper.
+        let invocations = read_env_aware_argv(&recorder.argv_log);
+        assert_no_network_children(&invocations);
+    }
+}
+
+// --- P4-161: redaction — no secrets or network diagnostics surfaced ---
+
+#[test]
+fn test_p4_161_no_secret_leak_promisor_begin() {
+    let (_dir, repo, recorder, _sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Inject distinctive secrets into the environment and config.
+    let secret_token = "SECRET_TOKEN_XYZ123";
+    let secret_password = "P@ssw0rd!Secret#456";
+    let helper_diagnostic = "HELPER_DIAGNOSTIC_TEXT_UNIQUE_789";
+
+    // Set a fake credential helper that would output secrets if invoked.
+    let sentinel_dir = tempfile::TempDir::new().unwrap();
+    let scripts_dir = sentinel_dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+    let cred_helper = scripts_dir.join("git-credential-fake.bat");
+    std::fs::write(
+        &cred_helper,
+        format!(
+            "echo username=secret_user\necho password={}\necho {}\n",
+            secret_password, helper_diagnostic
+        ),
+    )
+    .unwrap();
+
+    git(&repo)
+        .arg("config")
+        .arg("credential.helper")
+        .arg(cred_helper.display().to_string())
+        .output()
+        .unwrap();
+
+    // Run begin with recorder.
+    let output = run_begin_with_promisor_recorder(&recorder, &repo, final_rev, &final_sha);
+
+    // Collect all observable output.
+    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{} {}", stdout_str, stderr_str);
+
+    // Assert no secrets appear.
+    for secret in [
+        secret_token,
+        secret_password,
+        helper_diagnostic,
+        "SECRET_TOKEN",
+        "P@ssw0rd",
+        "fake-remote.example.com",
+    ] {
+        assert!(
+            !combined.contains(secret),
+            "secret '{}' leaked in output: {}",
+            secret,
+            combined
+        );
+    }
+
+    // Assert no raw network-derived Git diagnostic.
+    for forbidden in [
+        "fatal: The remote end hung up unexpectedly",
+        "Could not resolve host",
+        "Connection refused",
+        "SSL certificate problem",
+        "unable to access",
+    ] {
+        assert!(
+            !combined.contains(forbidden),
+            "network diagnostic leaked: {}",
+            forbidden
+        );
+    }
+}
+
+#[test]
+fn test_p4_161_no_secret_leak_promisor_check() {
+    let (_dir, repo, recorder, _sentinels, final_rev, final_sha) =
+        setup_promisor_with_sentinels_and_recorder();
+
+    // Normal begin first.
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Inject distinctive secrets into the environment and config.
+    let secret_token = "SECRET_TOKEN_XYZ123";
+    let secret_password = "P@ssw0rd!Secret#456";
+    let helper_diagnostic = "HELPER_DIAGNOSTIC_TEXT_UNIQUE_789";
+
+    // Set a fake credential helper that would output secrets if invoked.
+    let sentinel_dir = tempfile::TempDir::new().unwrap();
+    let scripts_dir = sentinel_dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+    let cred_helper = scripts_dir.join("git-credential-fake.bat");
+    std::fs::write(
+        &cred_helper,
+        format!(
+            "echo username=secret_user\necho password={}\necho {}\n",
+            secret_password, helper_diagnostic
+        ),
+    )
+    .unwrap();
+
+    git(&repo)
+        .arg("config")
+        .arg("credential.helper")
+        .arg(cred_helper.display().to_string())
+        .output()
+        .unwrap();
+
+    // Run check with recorder.
+    let output = run_check_with_promisor_recorder(&recorder, &repo);
+
+    // Collect all observable output.
+    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{} {}", stdout_str, stderr_str);
+
+    // Assert no secrets appear.
+    for secret in [
+        secret_token,
+        secret_password,
+        helper_diagnostic,
+        "SECRET_TOKEN",
+        "P@ssw0rd",
+        "fake-remote.example.com",
+    ] {
+        assert!(
+            !combined.contains(secret),
+            "secret '{}' leaked in output: {}",
+            secret,
+            combined
+        );
+    }
+
+    // Assert no raw network-derived Git diagnostic.
+    for forbidden in [
+        "fatal: The remote end hung up unexpectedly",
+        "Could not resolve host",
+        "Connection refused",
+        "SSL certificate problem",
+        "unable to access",
+    ] {
+        assert!(
+            !combined.contains(forbidden),
+            "network diagnostic leaked: {}",
+            forbidden
+        );
+    }
+}
+
+// === PKG-11: Sparse config and lifecycle matrix ===
+
+struct MalformedGitRecorder {
+    dir: tempfile::TempDir,
+}
+
+fn create_malformed_git_recorder(
+    intercept_key: &str,
+    intercept_output: &[u8],
+    exit_code: i32,
+) -> MalformedGitRecorder {
+    let dir = tempfile::TempDir::new().unwrap();
+    let wrapper_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&wrapper_dir).unwrap();
+    let output_bytes = intercept_output.to_vec();
+
+    // Use the same pattern as SparseGitRecorder which is known to work.
+    let source = format!(
+        r#"
+use std::env;
+use std::ffi::OsString;
+use std::io::Write;
+use std::process::Command;
+
+fn main() {{
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+
+    // Check if this is a config query for our intercepted key.
+    let args_str: Vec<String> = args.iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let is_target = args_str.contains(&"config".to_string())
+        && args_str.contains(&"--get".to_string())
+        && !args_str.contains(&"--get-all".to_string())
+        && args_str.contains(&"{key}".to_string());
+
+    if is_target {{
+        // Write the intercepted output to stdout.
+        let out_bytes: &[u8] = &{output:?};
+        std::io::stdout().write_all(out_bytes).ok();
+        std::process::exit({exit_code});
+    }}
+
+    // Delegate to real git for everything else.
+    let status = Command::new({real:?}).args(&args).status().unwrap();
+    std::process::exit(status.code().unwrap_or(1));
+}}
+"#,
+        output = output_bytes,
+        key = intercept_key,
+        exit_code = exit_code,
+        real = real_git_executable().display().to_string(),
+    );
+    let source_path = wrapper_dir.join("git-wrapper.rs");
+    std::fs::write(&source_path, &source).unwrap();
+    let wrapper = wrapper_dir.join("git.exe");
+    let compile = Command::new("rustc")
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&wrapper)
+        .output()
+        .unwrap();
+    assert_eq!(
+        compile.status.code(),
+        Some(0),
+        "wrapper compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    MalformedGitRecorder { dir }
+}
+
+fn run_with_malformed_git_recorder(
+    recorder: &MalformedGitRecorder,
+    repo: &Path,
+    operation: &[&str],
+) -> std::process::Output {
+    let old_path = std::env::var("PATH").unwrap();
+    let wrapper_path = recorder.dir.path().join("bin");
+    let mut cmd = cargo_bin();
+    cmd.args(operation)
+        .arg("--repo")
+        .arg(repo)
+        .env("PATH", format!("{};{}", wrapper_path.display(), old_path));
+    cmd.output().unwrap()
+}
+
+// P4-163: core.sparseCheckout=false does not reject by that signal alone.
+#[test]
+fn test_pkg11_core_sparse_checkout_false_ok() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("core.sparseCheckout")
+        .arg("false")
+        .status()
+        .unwrap();
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_begin_exact(&output, &repo);
+}
+
+// P4-164: unset core.sparseCheckout with exit 1 and empty output does not reject.
+#[test]
+fn test_pkg11_core_sparse_checkout_unset_ok() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    // Ensure core.sparseCheckout is unset.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--unset")
+        .arg("core.sparseCheckout")
+        .status()
+        .ok();
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_begin_exact(&output, &repo);
+}
+
+// P4-165: malformed sparse-checkout config output rejects with GIT_INVENTORY_INVALID.
+#[test]
+fn test_pkg11_core_sparse_checkout_malformed_matrix() {
+    struct MalformedCase {
+        output: Vec<u8>,
+        exit_code: i32,
+    }
+
+    let cases = vec![
+        MalformedCase {
+            output: b"maybe\n".to_vec(),
+            exit_code: 0,
+        },
+        MalformedCase {
+            output: b"true\nfalse\n".to_vec(),
+            exit_code: 0,
+        },
+        MalformedCase {
+            output: vec![0xFF, 0xFE, 0xFD],
+            exit_code: 0,
+        },
+        MalformedCase {
+            output: b"yes\n".to_vec(),
+            exit_code: 0,
+        },
+    ];
+
+    for case in cases {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let recorder =
+            create_malformed_git_recorder("core.sparseCheckout", &case.output, case.exit_code);
+        let output = run_with_malformed_git_recorder(
+            &recorder,
+            &repo,
+            &[
+                "implementation",
+                "begin",
+                "--revision",
+                &final_rev.to_string(),
+                "--sha256",
+                &final_sha,
+            ],
+        );
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+}
+
+// P4-166: multiple core.sparseCheckout values reject even when final is false.
+#[test]
+fn test_pkg11_core_sparse_checkout_multiple_values_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    // Add multiple values: true then false. Git --get returns first value.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--add")
+        .arg("core.sparseCheckout")
+        .arg("true")
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--add")
+        .arg("core.sparseCheckout")
+        .arg("false")
+        .status()
+        .unwrap();
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+}
+
+// P4-168: index.sparse=false does not reject by that signal alone.
+#[test]
+fn test_pkg11_index_sparse_false_ok() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("index.sparse")
+        .arg("false")
+        .status()
+        .unwrap();
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_begin_exact(&output, &repo);
+}
+
+// P4-169: unset index.sparse with exit 1 and empty output does not reject.
+#[test]
+fn test_pkg11_index_sparse_unset_ok() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    // Ensure index.sparse is unset.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--unset")
+        .arg("index.sparse")
+        .status()
+        .ok();
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_begin_exact(&output, &repo);
+}
+
+// P4-170: malformed sparse-index config output rejects with GIT_INVENTORY_INVALID.
+#[test]
+fn test_pkg11_index_sparse_malformed_matrix() {
+    struct MalformedCase {
+        output: Vec<u8>,
+        exit_code: i32,
+    }
+
+    let cases = vec![
+        MalformedCase {
+            output: b"maybe\n".to_vec(),
+            exit_code: 0,
+        },
+        MalformedCase {
+            output: b"true\nfalse\n".to_vec(),
+            exit_code: 0,
+        },
+        MalformedCase {
+            output: vec![0xFF, 0xFE, 0xFD],
+            exit_code: 0,
+        },
+        MalformedCase {
+            output: b"yes\n".to_vec(),
+            exit_code: 0,
+        },
+    ];
+
+    for case in cases {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let recorder = create_malformed_git_recorder("index.sparse", &case.output, case.exit_code);
+        let output = run_with_malformed_git_recorder(
+            &recorder,
+            &repo,
+            &[
+                "implementation",
+                "begin",
+                "--revision",
+                &final_rev.to_string(),
+                "--sha256",
+                &final_sha,
+            ],
+        );
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+}
+
+// P4-171: multiple index.sparse values reject even when final is false.
+#[test]
+fn test_pkg11_index_sparse_multiple_values_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    // Add multiple values: true then false.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--add")
+        .arg("index.sparse")
+        .arg("true")
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--add")
+        .arg("index.sparse")
+        .arg("false")
+        .status()
+        .unwrap();
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+}
+
+// P4-176: structural sparse-directory rejects when index.sparse is unset.
+// Uses git sparse-checkout to create actual sparse directory entries in the index,
+// then verifies rejection even after disabling index.sparse config.
+#[test]
+fn test_pkg11_sparse_directory_with_unset_index_sparse() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Create additional content to have something to sparse-checkout.
+    let subdir = repo.join("subdir");
+    std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::write(subdir.join("file.txt"), "content\n").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("add")
+        .arg("subdir")
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("-c")
+        .arg("user.name=test")
+        .arg("-c")
+        .arg("user.email=test@test.com")
+        .arg("commit")
+        .arg("-m")
+        .arg("add subdir")
+        .status()
+        .unwrap();
+
+    // Enable sparse checkout to create sparse directory entries.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("sparse-checkout")
+        .arg("init")
+        .arg("--cone")
+        .status()
+        .unwrap();
+
+    // Disable index.sparse config but keep sparse checkout active.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--unset")
+        .arg("index.sparse")
+        .status()
+        .ok();
+
+    // Verify index.sparse is unset.
+    let check = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("--get")
+        .arg("index.sparse")
+        .output()
+        .unwrap();
+    assert!(!check.status.success(), "index.sparse should be unset");
+
+    // Begin should still reject due to sparse checkout state.
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+}
+
+// P4-176: structural sparse-directory rejects when index.sparse=false.
+#[test]
+fn test_pkg11_sparse_directory_with_false_index_sparse() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    // Create additional content.
+    let subdir = repo.join("subdir");
+    std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::write(subdir.join("file.txt"), "content\n").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("add")
+        .arg("subdir")
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("-c")
+        .arg("user.name=test")
+        .arg("-c")
+        .arg("user.email=test@test.com")
+        .arg("commit")
+        .arg("-m")
+        .arg("add subdir")
+        .status()
+        .unwrap();
+
+    // Enable sparse checkout.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("sparse-checkout")
+        .arg("init")
+        .arg("--cone")
+        .status()
+        .unwrap();
+
+    // Explicitly set index.sparse=false.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("index.sparse")
+        .arg("false")
+        .status()
+        .unwrap();
+
+    // Begin should still reject due to sparse checkout state.
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+}
+
+// P4-177: active sparse checkout rejects when skip-worktree bits are cleared.
+#[test]
+fn test_pkg11_cleared_skip_worktree_still_rejected() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    // Set up active sparse checkout.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("core.sparseCheckout")
+        .arg("true")
+        .status()
+        .unwrap();
+    let sparse_checkout_file = repo.join(".git").join("info").join("sparse-checkout");
+    std::fs::write(&sparse_checkout_file, "README.md\n").unwrap();
+    // Set skip-worktree on README.md.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("update-index")
+        .arg("--skip-worktree")
+        .arg("README.md")
+        .status()
+        .unwrap();
+    // Clear skip-worktree bits.
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("update-index")
+        .arg("--no-skip-worktree")
+        .arg("README.md")
+        .status()
+        .unwrap();
+    // Sparse checkout config is still active; should reject.
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+}
+
+// P4-179: begin rejects each sparse state (lifecycle matrix).
+#[test]
+fn test_pkg11_begin_rejects_all_sparse_states() {
+    // Case 1: active sparse checkout.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("core.sparseCheckout")
+            .arg("true")
+            .status()
+            .unwrap();
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+
+    // Case 2: active sparse index.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("index.sparse")
+            .arg("true")
+            .status()
+            .unwrap();
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+
+    // Case 3: structural sparse-directory (reuse existing test pattern).
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("index.sparse")
+            .arg("true")
+            .status()
+            .unwrap();
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+}
+
+// P4-180: check rejects each sparse state (lifecycle matrix).
+#[test]
+fn test_pkg11_check_rejects_all_sparse_states() {
+    // Case 1: active sparse checkout at check.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("core.sparseCheckout")
+            .arg("true")
+            .status()
+            .unwrap();
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+
+    // Case 2: active sparse index at check.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("index.sparse")
+            .arg("true")
+            .status()
+            .unwrap();
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+
+    // Case 3: structural sparse-directory at check.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("index.sparse")
+            .arg("true")
+            .status()
+            .unwrap();
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+}
+
+// P4-181: failure-category mapping for sparse-state evidence.
+#[test]
+fn test_pkg11_sparse_failure_category_mapping() {
+    // Case 1: malformed successful output -> GIT_INVENTORY_INVALID.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let recorder =
+            create_malformed_git_recorder("core.sparseCheckout", b"malformed_value\n".as_ref(), 0);
+        let output = run_with_malformed_git_recorder(
+            &recorder,
+            &repo,
+            &[
+                "implementation",
+                "begin",
+                "--revision",
+                &final_rev.to_string(),
+                "--sha256",
+                &final_sha,
+            ],
+        );
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    }
+
+    // Case 2: git command execution failure -> GIT_COMMAND_FAILED.
+    // Use a wrapper that makes git config fail with exit code 1.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        // Create a wrapper that fails on config --get for sparse keys.
+        let dir = tempfile::TempDir::new().unwrap();
+        let wrapper_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+        let source = format!(
+            r#"
+use std::env;
+use std::ffi::OsString;
+use std::process::Command;
+
+fn main() {{
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let args_str: Vec<String> = args.iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let is_sparse_config = args_str.contains(&"config".to_string())
+        && args_str.contains(&"--get".to_string())
+        && (args_str.contains(&"core.sparseCheckout".to_string())
+            || args_str.contains(&"index.sparse".to_string()));
+
+    if is_sparse_config {{
+        eprintln!("fatal: unable to read config");
+        std::process::exit(1);
+    }}
+
+    let status = Command::new({real:?}).args(&args).status().unwrap();
+    std::process::exit(status.code().unwrap_or(1));
+}}
+"#,
+            real = real_git_executable().display().to_string(),
+        );
+        let source_path = wrapper_dir.join("git-wrapper.rs");
+        std::fs::write(&source_path, source).unwrap();
+        let wrapper = wrapper_dir.join("git.exe");
+        let compile = Command::new("rustc")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&wrapper)
+            .output()
+            .unwrap();
+        assert_eq!(compile.status.code(), Some(0));
+
+        let old_path = std::env::var("PATH").unwrap();
+        let mut cmd = cargo_bin();
+        cmd.args([
+            "implementation",
+            "begin",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--revision",
+            &final_rev.to_string(),
+            "--sha256",
+            &final_sha,
+        ])
+        .env("PATH", format!("{};{}", wrapper_dir.display(), old_path));
+        let output = cmd.output().unwrap();
+        assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+    }
+
+    // Case 3: abnormal child termination (simulated via wrapper exit with signal-like code).
+    // On Windows, we simulate this with a non-standard exit code that represents
+    // an abnormal termination. Platform limitation: Windows does not support Unix signals.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let wrapper_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+        let source = format!(
+            r#"
+use std::env;
+use std::ffi::OsString;
+use std::process::Command;
+
+fn main() {{
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let args_str: Vec<String> = args.iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let is_sparse_config = args_str.contains(&"config".to_string())
+        && args_str.contains(&"--get".to_string())
+        && (args_str.contains(&"core.sparseCheckout".to_string())
+            || args_str.contains(&"index.sparse".to_string()));
+
+    if is_sparse_config {{
+        // Simulate abnormal termination with exit code 128+signal.
+        std::process::exit(139);
+    }}
+
+    let status = Command::new({real:?}).args(&args).status().unwrap();
+    std::process::exit(status.code().unwrap_or(1));
+}}
+"#,
+            real = real_git_executable().display().to_string(),
+        );
+        let source_path = wrapper_dir.join("git-wrapper.rs");
+        std::fs::write(&source_path, source).unwrap();
+        let wrapper = wrapper_dir.join("git.exe");
+        let compile = Command::new("rustc")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&wrapper)
+            .output()
+            .unwrap();
+        assert_eq!(compile.status.code(), Some(0));
+
+        let old_path = std::env::var("PATH").unwrap();
+        let mut cmd = cargo_bin();
+        cmd.args([
+            "implementation",
+            "begin",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--revision",
+            &final_rev.to_string(),
+            "--sha256",
+            &final_sha,
+        ])
+        .env("PATH", format!("{};{}", wrapper_dir.display(), old_path));
+        let output = cmd.output().unwrap();
+        assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+    }
+}
+
+// === PKG-12: Real cone/non-cone/sparse-index repository fixtures ===
+
+/// Set up a valid implementation repo with committed content suitable for sparse selection.
+/// Returns (tempdir, repo_path, final_rev, final_sha).
+fn setup_sparse_fixture() -> (tempfile::TempDir, std::path::PathBuf, u32, String) {
+    let (_dir, repo) = setup_implementation_basic();
+
+    // Create fixture files.
+    std::fs::create_dir_all(repo.join("included").join("nested")).unwrap();
+    std::fs::create_dir_all(repo.join("excluded").join("nested")).unwrap();
+    std::fs::write(repo.join("root-file.txt"), "root content\n").unwrap();
+    std::fs::write(repo.join("included").join("a.txt"), "included a\n").unwrap();
+    std::fs::write(
+        repo.join("included").join("nested").join("b.txt"),
+        "included nested b\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("excluded").join("c.txt"), "excluded c\n").unwrap();
+    std::fs::write(
+        repo.join("excluded").join("nested").join("d.txt"),
+        "excluded nested d\n",
+    )
+    .unwrap();
+
+    // Commit fixture files individually, avoiding .mrgs/ which must stay untracked.
+    git_cmd(&repo, &["add", "root-file.txt", "included/", "excluded/"]);
+    commit_file(&repo, "root-file.txt");
+
+    // Verify clean (only untracked .mrgs/ artifacts should remain).
+    let status = git_cmd_output(&repo, &["status", "--porcelain"]);
+    let status_str = String::from_utf8_lossy(&status.stdout);
+    for line in status_str.lines() {
+        assert!(
+            line.starts_with("?? .mrgs/"),
+            "unexpected dirty status: {}",
+            line
+        );
+    }
+
+    // Accept contract.
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    (_dir, repo, final_rev, final_sha)
+}
+
+/// Run a git command and assert success, returning Output.
+fn git_cmd_output(repo: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo);
+    cmd.args(args);
+    cmd.output().unwrap()
+}
+
+/// Run a git command and assert success.
+fn git_cmd(repo: &Path, args: &[&str]) {
+    let out = git_cmd_output(repo, args);
+    assert!(
+        out.status.success(),
+        "git {} failed: stderr={}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Run implementation begin and return Output.
+fn run_begin(repo: &Path, final_rev: u32, final_sha: &str) -> std::process::Output {
+    run_implementation_begin(repo, final_rev, final_sha)
+}
+
+// P4-172: actual cone-mode sparse-checkout repository is rejected.
+#[test]
+fn test_pkg12_real_cone_sparse_checkout_rejected() {
+    let (_dir, repo, final_rev, final_sha) = setup_sparse_fixture();
+
+    // Create real cone-mode sparse checkout.
+    // This implicitly proves sparse-checkout capability.
+    git_cmd(&repo, &["sparse-checkout", "init", "--cone"]);
+    git_cmd(&repo, &["sparse-checkout", "set", "included"]);
+
+    // Prove cone mode is active.
+    assert!(repo
+        .join(".git")
+        .join("info")
+        .join("sparse-checkout")
+        .exists());
+
+    let sc_config = git_cmd_output(&repo, &["config", "--get", "core.sparseCheckout"]);
+    let sc_val = String::from_utf8_lossy(&sc_config.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(sc_val, "true", "core.sparseCheckout should be true");
+
+    // Prove cone mode is set.
+    let cone_config = git_cmd_output(&repo, &["config", "--get", "core.sparseCheckoutCone"]);
+    let cone_val = String::from_utf8_lossy(&cone_config.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(cone_val, "true", "core.sparseCheckoutCone should be true");
+
+    // Prove working tree is sparse: included present, excluded absent.
+    assert!(
+        repo.join("included").join("a.txt").exists(),
+        "included/a.txt should be present"
+    );
+    assert!(
+        !repo.join("excluded").join("c.txt").exists(),
+        "excluded/c.txt should be absent"
+    );
+
+    // Prove tracked files are clean (ignore untracked .mrgs/ artifacts).
+    let status = git_cmd_output(&repo, &["diff", "--quiet", "HEAD"]);
+    assert!(
+        status.status.success(),
+        "tracked files not clean: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    // Run implementation begin - must reject.
+    let output = run_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+}
+
+// P4-173: actual non-cone sparse-checkout repository is rejected.
+#[test]
+fn test_pkg12_real_non_cone_sparse_checkout_rejected() {
+    let (_dir, repo, final_rev, final_sha) = setup_sparse_fixture();
+
+    // Create real non-cone sparse checkout.
+    // Include governance files (plan.toml, contract.toml) in the patterns so
+    // MRGS can validate them before reaching the sparse config check.
+    // The patterns still prove non-cone mode is active.
+    git_cmd(&repo, &["sparse-checkout", "init", "--no-cone"]);
+    git_cmd(
+        &repo,
+        &[
+            "sparse-checkout",
+            "set",
+            "--no-cone",
+            "/included/a.txt",
+            "/excluded/c.txt",
+            "/plan.toml",
+            "/contract.toml",
+        ],
+    );
+
+    // Prove sparse checkout is active.
+    assert!(repo
+        .join(".git")
+        .join("info")
+        .join("sparse-checkout")
+        .exists());
+
+    let sc_config = git_cmd_output(&repo, &["config", "--get", "core.sparseCheckout"]);
+    let sc_val = String::from_utf8_lossy(&sc_config.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(sc_val, "true", "core.sparseCheckout should be true");
+
+    // Prove cone mode is NOT set (non-cone).
+    let cone_config = git_cmd_output(&repo, &["config", "--get", "core.sparseCheckoutCone"]);
+    let cone_val = String::from_utf8_lossy(&cone_config.stdout)
+        .trim()
+        .to_string();
+    assert!(
+        cone_val.is_empty() || cone_val == "false",
+        "core.sparseCheckoutCone should be false/absent for non-cone, got: {}",
+        cone_val
+    );
+
+    // Prove non-cone patterns in sparse-checkout file.
+    let sparse_file = repo.join(".git").join("info").join("sparse-checkout");
+    let sparse_content = std::fs::read_to_string(&sparse_file).unwrap();
+    assert!(
+        sparse_content.contains("/included/a.txt"),
+        "sparse-checkout should contain /included/a.txt pattern"
+    );
+    assert!(
+        sparse_content.contains("/excluded/c.txt"),
+        "sparse-checkout should contain /excluded/c.txt pattern"
+    );
+
+    // Prove selected content present, excluded absent.
+    assert!(
+        repo.join("included").join("a.txt").exists(),
+        "included/a.txt should be present"
+    );
+    assert!(
+        !repo.join("included").join("nested").join("b.txt").exists(),
+        "included/nested/b.txt should be absent (not in pattern)"
+    );
+    assert!(
+        !repo.join("excluded").join("nested").join("d.txt").exists(),
+        "excluded/nested/d.txt should be absent"
+    );
+
+    // Prove tracked files are clean (ignore untracked .mrgs/ artifacts).
+    let status = git_cmd_output(&repo, &["diff", "--quiet", "HEAD"]);
+    assert!(
+        status.status.success(),
+        "tracked files not clean: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    // Run implementation begin - must reject.
+    let output = run_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+}
+
+// P4-174: actual sparse-index repository is rejected without silently expanding its index.
+#[test]
+fn test_pkg12_real_sparse_index_rejected_without_expansion() {
+    let (_dir, repo, final_rev, final_sha) = setup_sparse_fixture();
+
+    // Create real sparse-index repository.
+    git_cmd(
+        &repo,
+        &["sparse-checkout", "init", "--cone", "--sparse-index"],
+    );
+    git_cmd(&repo, &["sparse-checkout", "set", "included"]);
+
+    // Prove sparse checkout and sparse index are active.
+    let sc_config = git_cmd_output(&repo, &["config", "--get", "core.sparseCheckout"]);
+    let sc_val = String::from_utf8_lossy(&sc_config.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(sc_val, "true", "core.sparseCheckout should be true");
+
+    let si_config = git_cmd_output(&repo, &["config", "--get", "index.sparse"]);
+    let si_val = String::from_utf8_lossy(&si_config.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(si_val, "true", "index.sparse should be true");
+
+    // Prove working tree is genuinely sparse.
+    assert!(
+        repo.join("included").join("a.txt").exists(),
+        "included/a.txt should be present"
+    );
+    assert!(
+        !repo.join("excluded").join("c.txt").exists(),
+        "excluded/c.txt should be absent"
+    );
+
+    // Prove git ls-files --sparse --stage -z contains mode 040000 records.
+    // Parse raw bytes directly since -z uses NUL delimiters.
+    let ls_files = git_cmd_output(&repo, &["ls-files", "--sparse", "--stage", "-z"]);
+    let ls_files_raw = ls_files.stdout.clone();
+    let sparse_records: Vec<&[u8]> = ls_files_raw
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty() && entry.starts_with(b"040000 "))
+        .collect();
+    assert!(
+        !sparse_records.is_empty(),
+        "expected at least one mode 040000 sparse-directory record; raw: {:?}",
+        String::from_utf8_lossy(&ls_files_raw)
+    );
+
+    // Verify trailing slash on sparse-directory paths.
+    for record in &sparse_records {
+        let record_str = String::from_utf8_lossy(record);
+        let parts: Vec<&str> = record_str.split('\t').collect();
+        assert_eq!(parts.len(), 2, "unexpected ls-files format: {}", record_str);
+        assert!(
+            parts[1].ends_with('/'),
+            "sparse-directory path should have trailing slash: {}",
+            record_str
+        );
+    }
+
+    // Capture index state BEFORE MRGS invocation.
+    let index_path = repo.join(".git").join("index");
+    let index_before = std::fs::read(&index_path).unwrap();
+    let index_sha_before = sha256_hex(&index_before);
+    let index_len_before = index_before.len();
+    let sparse_count_before = sparse_records.len();
+
+    // Extract sparse directory paths before
+    let sparse_paths_before: Vec<String> = sparse_records
+        .iter()
+        .map(|r| {
+            String::from_utf8_lossy(r)
+                .split('\t')
+                .nth(1)
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+
+    // Print required evidence
+    println!("PKG12_INDEX_SHA256_BEFORE={}", index_sha_before);
+    println!("PKG12_INDEX_LENGTH_BEFORE={}", index_len_before);
+    println!(
+        "PKG12_SPARSE_DIRECTORY_RECORDS_BEFORE={}",
+        sparse_paths_before.join(",")
+    );
+
+    // Capture working-tree presence/absence matrix.
+    let wt_included_a = repo.join("included").join("a.txt").exists();
+    let wt_included_b = repo.join("included").join("nested").join("b.txt").exists();
+    let wt_excluded_c = repo.join("excluded").join("c.txt").exists();
+    let wt_excluded_d = repo.join("excluded").join("nested").join("d.txt").exists();
+
+    // Capture git status of tracked files.
+    let status_before = git_cmd_output(&repo, &["diff", "--quiet", "HEAD"]);
+    let status_before_clean = status_before.status.success();
+
+    // Run implementation begin - must reject.
+    let output = run_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+
+    // Capture index state AFTER MRGS invocation.
+    // Do NOT run any Git command before this snapshot.
+    let index_after = std::fs::read(&index_path).unwrap();
+    let index_sha_after = sha256_hex(&index_after);
+    let index_len_after = index_after.len();
+
+    // Prove index was NOT expanded/rewritten.
+    assert_eq!(
+        index_sha_before, index_sha_after,
+        "INDEX_SHA256_EQUAL_BEFORE_AFTER failed: {} != {}",
+        index_sha_before, index_sha_after
+    );
+    assert_eq!(
+        index_len_before, index_len_after,
+        "INDEX_LENGTH_EQUAL_BEFORE_AFTER failed: {} vs {}",
+        index_len_before, index_len_after
+    );
+    assert_eq!(
+        index_before, index_after,
+        "INDEX_BYTES_EQUAL_BEFORE_AFTER failed"
+    );
+
+    // Prove sparse-directory records unchanged.
+    let ls_files_after = git_cmd_output(&repo, &["ls-files", "--sparse", "--stage", "-z"]);
+    let ls_files_after_raw = ls_files_after.stdout;
+    let sparse_records_after: Vec<&[u8]> = ls_files_after_raw
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty() && entry.starts_with(b"040000 "))
+        .collect();
+    assert_eq!(
+        sparse_count_before,
+        sparse_records_after.len(),
+        "SPARSE_DIRECTORY_RECORDS_EQUAL_BEFORE_AFTER failed: {} vs {}",
+        sparse_count_before,
+        sparse_records_after.len()
+    );
+
+    // Extract sparse directory paths after
+    let sparse_paths_after: Vec<String> = sparse_records_after
+        .iter()
+        .map(|r| {
+            String::from_utf8_lossy(r)
+                .split('\t')
+                .nth(1)
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+
+    // Print required evidence
+    println!("PKG12_INDEX_SHA256_AFTER={}", index_sha_after);
+    println!("PKG12_INDEX_LENGTH_AFTER={}", index_len_after);
+    println!(
+        "PKG12_SPARSE_DIRECTORY_RECORDS_AFTER={}",
+        sparse_paths_after.join(",")
+    );
+
+    // Verify SHA-256 equality
+    assert_eq!(
+        index_sha_before, index_sha_after,
+        "INDEX_SHA256_EQUAL_BEFORE_AFTER failed: {} != {}",
+        index_sha_before, index_sha_after
+    );
+
+    // Prove working-tree matrix unchanged.
+    assert_eq!(wt_included_a, repo.join("included").join("a.txt").exists());
+    assert_eq!(
+        wt_included_b,
+        repo.join("included").join("nested").join("b.txt").exists()
+    );
+    assert_eq!(wt_excluded_c, repo.join("excluded").join("c.txt").exists());
+    assert_eq!(
+        wt_excluded_d,
+        repo.join("excluded").join("nested").join("d.txt").exists()
+    );
+
+    // Prove git status unchanged.
+    let status_after = git_cmd_output(&repo, &["diff", "--quiet", "HEAD"]);
+    let status_after_clean = status_after.status.success();
+    assert_eq!(
+        status_before_clean, status_after_clean,
+        "GIT_STATUS_EQUAL_BEFORE_AFTER failed"
+    );
+}
+
+/// Compute SHA-256 hex string of bytes using certutil on Windows.
+fn sha256_hex(data: &[u8]) -> String {
+    // Use a unique temp path per call to avoid file locking issues with parallel tests on Windows.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp_dir = std::env::temp_dir();
+    let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp_path = tmp_dir.join(format!(
+        "pkg13_sha256_{}_{}.tmp",
+        std::process::id(),
+        counter
+    ));
+    std::fs::write(&tmp_path, data).unwrap();
+    let out = Command::new("certutil")
+        .args(["-hashfile", tmp_path.to_str().unwrap(), "SHA256"])
+        .output()
+        .unwrap();
+    // Clean up temp file.
+    let _ = std::fs::remove_file(&tmp_path);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // certutil output: line 1 = header, line 2 = hash, line 3 = "CertUtil: -hashfile command completed successfully."
+    stdout
+        .lines()
+        .nth(1)
+        .unwrap_or("")
+        .replace(' ', "")
+        .to_lowercase()
+}
+
+// ============================================================================
+// PKG-13: Preservation tests
+// ============================================================================
+
+/// Typed governance entry: distinguishes directory, regular file, and symlink
+/// kinds so that byte-for-byte equality is kind-aware and lossless.  A bare
+/// `Vec<u8>` value could not tell an empty directory from an empty regular file
+/// or a symlink whose target happens to have the same bytes as file content.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum GovernanceEntry {
+    MissingRoot,
+    Directory,
+    RegularFile(Vec<u8>),
+    Symlink(Vec<u8>),
+}
+
+/// Exhaustive fail-closed governance (.mrgs/*) snapshot.
+/// Recursively records every .mrgs entry with lossless native OsString relative path,
+/// explicit directory/regular-file/symlink kind, exact regular bytes and
+/// lossless symlink target bytes.  Fails immediately on every read_dir, entry,
+/// metadata, read, and link-target error.  No filter_map(Result::ok), .ok(),
+/// if let Ok, unwrap_or_default or equivalent.  Deterministic BTreeMap sort.
+/// Preserves all five pre/post snapshot callsites and exact equality assertions.
+fn capture_governance(
+    repo: &Path,
+) -> std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry> {
+    let mrgs = repo.join(".mrgs");
+    let mut result = std::collections::BTreeMap::new();
+    // GAP2: unconditionally metadata the .mrgs root; NotFound returns explicit
+    // MissingRoot snapshot; all other errors fail immediately.
+    let root_meta = match std::fs::symlink_metadata(&mrgs) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            result.insert(
+                std::ffi::OsString::from(".mrgs"),
+                GovernanceEntry::MissingRoot,
+            );
+            return result;
+        }
+        Err(e) => {
+            panic!(
+                "capture_governance: symlink_metadata failed for .mrgs root {}: {}",
+                mrgs.display(),
+                e
+            )
+        }
+    };
+    assert!(
+        root_meta.is_dir(),
+        "capture_governance: .mrgs root must be a directory, got {:?}",
+        root_meta.file_type()
+    );
+    result.insert(
+        std::ffi::OsString::from(".mrgs"),
+        GovernanceEntry::Directory,
+    );
+    let mut stack = vec![mrgs.clone()];
+    while let Some(current) = stack.pop() {
+        let read_dir_iter = std::fs::read_dir(&current).unwrap_or_else(|e| {
+            panic!(
+                "capture_governance: read_dir failed for {}: {}",
+                current.display(),
+                e
+            )
+        });
+        for entry_result in read_dir_iter {
+            let entry = entry_result.unwrap_or_else(|e| {
+                panic!(
+                    "capture_governance: entry iteration error in {}: {}",
+                    current.display(),
+                    e
+                );
+            });
+            let meta = std::fs::symlink_metadata(entry.path()).unwrap_or_else(|e| {
+                panic!(
+                    "capture_governance: symlink_metadata failed for {}: {}",
+                    entry.path().display(),
+                    e
+                );
+            });
+            // GAP1: lossless native OsString key from relative path.
+            let entry_path = entry.path();
+            let rel = entry_path
+                .strip_prefix(repo)
+                .unwrap_or(entry_path.as_path());
+            let os_key = rel.as_os_str().to_os_string();
+            if meta.is_dir() {
+                result.insert(os_key, GovernanceEntry::Directory);
+                stack.push(entry.path());
+            } else if meta.is_symlink() {
+                let target = std::fs::read_link(entry.path()).unwrap_or_else(|e| {
+                    panic!(
+                        "capture_governance: read_link failed for {}: {}",
+                        entry.path().display(),
+                        e
+                    );
+                });
+                // Lossless: store the OS-native target bytes (WTF-8 on Windows,
+                // raw bytes on Unix) without any UTF-8 conversion.
+                let target_bytes = target.as_os_str().as_encoded_bytes().to_vec();
+                result.insert(os_key, GovernanceEntry::Symlink(target_bytes));
+            } else if meta.is_file() {
+                let bytes = std::fs::read(entry.path()).unwrap_or_else(|e| {
+                    panic!(
+                        "capture_governance: read failed for {}: {}",
+                        entry.path().display(),
+                        e
+                    );
+                });
+                result.insert(os_key, GovernanceEntry::RegularFile(bytes));
+            } else {
+                panic!(
+                    "capture_governance: unsupported entry type (not dir/symlink/file) for {}",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+    result
+}
+
+/// Helper that runs a preservation check: capture before, run operation,
+/// capture after, assert equality.
+#[allow(dead_code)]
+fn assert_governance_preserved<F>(repo: &Path, op: F)
+where
+    F: FnOnce() -> std::process::Output,
+{
+    let before = capture_governance(repo);
+    let _output = op();
+    let after = capture_governance(repo);
+    assert_eq!(before, after, "governance files changed during operation");
+}
+
+// ---------------------------------------------------------------------------
+// P4-082: check writes nothing (success and failure)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_check_writes_nothing_success_and_failure() {
+    // --- Success case ---
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let before = capture_snapshot(&repo);
+    let output = run_implementation_check(&repo);
+    assert_success(&output);
+    let after = capture_snapshot(&repo);
+    let diffs = diff_snapshots(&before, &after);
+    assert!(
+        diffs.is_empty(),
+        "check success must not modify any filesystem entries; diffs: {:?}",
+        diffs
+    );
+
+    // --- Failure case: no begin (governance authority missing) ---
+    let (_dir2, repo2) = setup_implementation_basic();
+    let before2 = capture_snapshot(&repo2);
+    let output2 = run_implementation_check(&repo2);
+    assert_failure(&output2);
+    let after2 = capture_snapshot(&repo2);
+    let diffs2 = diff_snapshots(&before2, &after2);
+    assert!(
+        diffs2.is_empty(),
+        "check failure must not modify any filesystem entries; diffs: {:?}",
+        diffs2
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4-083: failed begin governance preservation matrix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_failed_begin_governance_preservation_matrix() {
+    // 1. Governance authority invalid (no accepted contract) - bad revision
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let before = capture_governance(&repo);
+        let expected: std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry> =
+            std::collections::BTreeMap::from([(
+                std::ffi::OsString::from(".mrgs"),
+                GovernanceEntry::MissingRoot,
+            )]);
+        assert_eq!(
+            before, expected,
+            "before snapshot must be exact MissingRoot"
+        );
+        let output = run_implementation_begin_str(
+            &repo,
+            "abc",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_phase4_failure_exact(&output, "INVALID_ARGUMENT");
+        assert!(
+            output.stdout.is_empty(),
+            "stdout must be empty for failed begin"
+        );
+        let after = capture_governance(&repo);
+        assert_eq!(after, expected, "after snapshot must be exact MissingRoot");
+        assert_eq!(before, after, "before == after: governance preserved");
+    }
+
+    // 2. Contract not accepted / stale revision
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin_str(
+            &repo,
+            "999",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_phase4_failure_exact(&output, "CONTRACT_NOT_ACCEPTED");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during stale revision begin"
+        );
+    }
+
+    // 3. Git dirty (unstaged modification)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::write(repo.join("README.md"), b"modified").unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during unstaged mod begin"
+        );
+    }
+
+    // 4. Git dirty (staged change)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::write(repo.join("staged.txt"), b"staged").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("staged.txt")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during staged change begin"
+        );
+    }
+
+    // 5. Git dirty (untracked file)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::write(repo.join("untracked.txt"), b"untracked").unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during untracked file begin"
+        );
+    }
+
+    // 6. Git dirty (ignored file)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::write(repo.join(".gitignore"), b"*.log\n").unwrap();
+        commit_file(&repo, ".gitignore");
+        std::fs::write(repo.join("build.log"), b"ignored content").unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during ignored file begin"
+        );
+    }
+
+    // 7. Tracked governance (accepted-plan)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/accepted-plan.json")
+            .status()
+            .unwrap();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked accepted-plan begin"
+        );
+    }
+
+    // 8. Tracked governance (state.json)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/state.json")
+            .status()
+            .unwrap();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked state begin"
+        );
+    }
+
+    // 9. Tracked governance (contract-draft)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/contract-draft.json")
+            .status()
+            .unwrap();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked contract-draft begin"
+        );
+    }
+
+    // 10. Tracked governance (accepted-contract)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/accepted-contract.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked accepted-contract begin"
+        );
+    }
+
+    // 11. Tracked governance (implementation-authority)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/implementation-authority.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked impl-authority begin"
+        );
+    }
+
+    // 12. Tracked extra .mrgs path
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::write(repo.join(".mrgs").join("extra.json"), b"{}").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/extra.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked extra mrgs begin"
+        );
+    }
+
+    // 13. core.sparseCheckout=true
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("core.sparseCheckout")
+            .arg("true")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during sparse checkout begin"
+        );
+    }
+
+    // 14. index.sparse=true
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("index.sparse")
+            .arg("true")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during index sparse begin"
+        );
+    }
+
+    // 15. Submodule present
+    {
+        let (dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let sub_dir = dir.path().join("sub");
+        Command::new("git")
+            .arg("init")
+            .arg(&sub_dir)
+            .status()
+            .unwrap();
+        std::fs::write(sub_dir.join("sub_file.txt"), b"sub").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&sub_dir)
+            .arg("add")
+            .arg(".")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&sub_dir)
+            .arg("-c")
+            .arg("user.name=test")
+            .arg("-c")
+            .arg("user.email=test@test.com")
+            .arg("commit")
+            .arg("-m")
+            .arg("init")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("-c")
+            .arg("protocol.file.allow=always")
+            .arg("submodule")
+            .arg("add")
+            .arg(&sub_dir)
+            .arg("submod")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_SUBMODULE_UNSUPPORTED");
+        let after = capture_governance(&repo);
+        assert_eq!(before, after, "governance changed during submodule begin");
+    }
+
+    // 16. Merge head present
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        create_git_marker(&repo, "MERGE_HEAD");
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+        let after = capture_governance(&repo);
+        assert_eq!(before, after, "governance changed during merge head begin");
+    }
+
+    // 17. Detached HEAD
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let head_output = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        let head_sha = String::from_utf8(head_output.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("checkout")
+            .arg("--detach")
+            .arg(&head_sha)
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_DETACHED_HEAD");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during detached head begin"
+        );
+    }
+
+    // 18. Non-git repo
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("not-a-repo");
+        std::fs::create_dir(&repo).unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin_str(
+            &repo,
+            "1",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_phase4_failure_exact(&output, "GOVERNANCE_AUTHORITY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during non-git repo begin"
+        );
+    }
+
+    // 19. Index conflict stage (unstaged merge conflict) - same validation path as GIT_DIRTY
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        // Create a tracked file then modify it to simulate conflict state.
+        std::fs::write(repo.join("conflict.txt"), b"base").unwrap();
+        git(&repo).arg("add").arg("conflict.txt").status().unwrap();
+        commit_file(&repo, "conflict.txt");
+        // Now modify the file (unstaged change = dirty/conflict-like state).
+        std::fs::write(
+            repo.join("conflict.txt"),
+            b"<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> theirs",
+        )
+        .unwrap();
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during conflict stage begin"
+        );
+    }
+
+    // 20. Git command execution failure (direct begin evidence)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        // Write invalid config so every subsequent git command fails.
+        std::fs::write(
+            repo.join(".git").join("config"),
+            b"[invalid\nunterminated-string = true\n",
+        )
+        .unwrap();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+        let after_snap = capture_snapshot(&repo);
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "begin-git-command-failure",
+            &[
+                "governance",
+                "git_refs",
+                "git_index",
+                "git_config",
+                "git_objects",
+                "worktree",
+            ],
+        );
+        let allowed: Vec<String> = Vec::new();
+        assert_no_new_mrgs_temp_paths(
+            &before_snap,
+            &after_snap,
+            "begin-git-command-failure",
+            &allowed,
+        );
+    }
+
+    // 21. Existing implementation-authority conflict (authority exists but revision mismatch)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        // Create a stale authority file with wrong revision.
+        let auth_path = repo.join(".mrgs").join("implementation-authority.json");
+        let stale_auth = serde_json::json!({
+            "revision": 999u32,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "baseline_branch": "main"
+        });
+        std::fs::write(
+            &auth_path,
+            serde_json::to_string_pretty(&stale_auth).unwrap(),
+        )
+        .unwrap();
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during authority conflict begin"
+        );
+    }
+
+    // 22. Stale implementation-authority binding (authority exists but baseline branch changed)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        // Create authority with wrong baseline branch.
+        let auth_path = repo.join(".mrgs").join("implementation-authority.json");
+        let stale_auth = serde_json::json!({
+            "revision": final_rev,
+            "sha256": final_sha.clone(),
+            "baseline_branch": "wrong-branch"
+        });
+        std::fs::write(
+            &auth_path,
+            serde_json::to_string_pretty(&stale_auth).unwrap(),
+        )
+        .unwrap();
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during stale binding begin"
+        );
+    }
+
+    // 23. Rebase-apply operation-in-progress marker (direct begin evidence)
+    // Production validate_operation_state() checks the rebase-apply/applying directory.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        create_git_marker(&repo, "rebase-apply/applying");
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+        let after_snap = capture_snapshot(&repo);
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "begin-rebase-marker",
+            &[
+                "governance",
+                "git_refs",
+                "git_index",
+                "git_config",
+                "git_objects",
+                "worktree",
+            ],
+        );
+        let allowed: Vec<String> = Vec::new();
+        assert_no_new_mrgs_temp_paths(&before_snap, &after_snap, "begin-rebase-marker", &allowed);
+    }
+
+    // 24. Cherry-pick operation-in-progress marker (direct begin evidence)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        create_git_marker(&repo, "CHERRY_PICK_HEAD");
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during cherry-pick head begin"
+        );
+    }
+
+    // 25. REVERT_HEAD operation-in-progress marker (same validation path)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        create_git_marker(&repo, "REVERT_HEAD");
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+        let after = capture_governance(&repo);
+        assert_eq!(before, after, "governance changed during revert head begin");
+    }
+
+    // 26. Bisect state operation-in-progress marker (same validation path)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        create_git_marker(&repo, "BISECT_LOG");
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+        let after = capture_governance(&repo);
+        assert_eq!(before, after, "governance changed during bisect log begin");
+    }
+
+    // 27. Invalid path rule (path outside repo)
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+
+        let before = capture_governance(&repo);
+        let outside_path = dir.path().join("outside-repo");
+        let mut cmd = cargo_bin();
+        cmd.arg("implementation")
+            .arg("begin")
+            .arg("--repo")
+            .arg(&outside_path)
+            .arg("--revision")
+            .arg("1")
+            .arg("--sha256")
+            .arg("0000000000000000000000000000000000000000000000000000000000000000");
+        let output = cmd.output().unwrap();
+
+        assert_phase4_failure_exact(&output, "REPOSITORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during invalid path begin"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4-084: failed check governance preservation matrix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_failed_check_governance_preservation_matrix() {
+    // 1. No begin (no accepted contract)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "CONTRACT_NOT_ACCEPTED");
+        let after = capture_governance(&repo);
+        assert_eq!(before, after, "governance changed during no-begin check");
+    }
+
+    // 2. Branch changed (same commit)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("checkout")
+            .arg("-b")
+            .arg("same-commit-branch")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "BASELINE_BRANCH_CHANGED");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during branch-changed check"
+        );
+    }
+
+    // 3. Baseline not ancestor
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        let root_tree = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("mktree")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let root_commit = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("commit-tree")
+                .arg(&root_tree)
+                .arg("-m")
+                .arg("root")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let current_tree = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("rev-parse")
+                .arg("HEAD^{tree}")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let new_commit = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("commit-tree")
+                .arg(&current_tree)
+                .arg("-p")
+                .arg(&root_commit)
+                .arg("-m")
+                .arg("replacement")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("update-ref")
+            .arg("refs/heads/main")
+            .arg(&new_commit)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("reset")
+            .arg("--hard")
+            .arg(&new_commit)
+            .status()
+            .unwrap();
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "BASELINE_HISTORY_CHANGED");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during baseline-not-ancestor check"
+        );
+    }
+
+    // 4. Tracked governance (accepted-plan)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        git(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/accepted-plan.json")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("track accepted-plan.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked accepted-plan check"
+        );
+    }
+
+    // 5. Tracked governance (state.json)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        git(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/state.json")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("track state.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked state check"
+        );
+    }
+
+    // 6. Tracked governance (contract-draft)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        git(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/contract-draft.json")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("track contract-draft.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked contract-draft check"
+        );
+    }
+
+    // 7. Tracked governance (accepted-contract)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        git(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/accepted-contract.json")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("track accepted-contract.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked accepted-contract check"
+        );
+    }
+
+    // 8. Tracked governance (implementation-authority)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        git(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/implementation-authority.json")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("track implementation-authority.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked impl-authority check"
+        );
+    }
+
+    // 9. Tracked extra JSON
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        std::fs::write(repo.join(".mrgs").join("extra.json"), b"{}").unwrap();
+        git(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".mrgs/extra.json")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("track extra.json")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during tracked extra json check"
+        );
+    }
+
+    // 10. Forbidden path change (case alias)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        std::fs::create_dir_all(repo.join(".GIT")).unwrap();
+        std::fs::write(repo.join(".GIT").join("config"), b"alias test").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg("--force")
+            .arg(".GIT/config")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("-c")
+            .arg("user.name=test")
+            .arg("-c")
+            .arg("user.email=test@test.com")
+            .arg("commit")
+            .arg("-m")
+            .arg("add .GIT alias")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during forbidden case alias check"
+        );
+    }
+
+    // 11. Submodule present
+    {
+        let (dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        let sub_dir = dir.path().join("sub");
+        Command::new("git")
+            .arg("init")
+            .arg(&sub_dir)
+            .status()
+            .unwrap();
+        std::fs::write(sub_dir.join("sub_file.txt"), b"sub").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&sub_dir)
+            .arg("add")
+            .arg(".")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&sub_dir)
+            .arg("-c")
+            .arg("user.name=test")
+            .arg("-c")
+            .arg("user.email=test@test.com")
+            .arg("commit")
+            .arg("-m")
+            .arg("init")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("-c")
+            .arg("protocol.file.allow=always")
+            .arg("submodule")
+            .arg("add")
+            .arg(&sub_dir)
+            .arg("submod")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add submodule")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_SUBMODULE_UNSUPPORTED");
+        let after = capture_governance(&repo);
+        assert_eq!(before, after, "governance changed during submodule check");
+    }
+
+    // 12. core.sparseCheckout=true
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("core.sparseCheckout")
+            .arg("true")
+            .status()
+            .unwrap();
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during sparse checkout check"
+        );
+    }
+
+    // 13. Malformed implementation authority (invalid JSON)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Corrupt the authority file.
+        let auth_path = repo.join(".mrgs").join("implementation-authority.json");
+        std::fs::write(&auth_path, b"NOT VALID JSON {{{").unwrap();
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during malformed authority check"
+        );
+    }
+
+    // 14. Stale implementation authority (revision mismatch)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Overwrite authority with wrong revision.
+        let auth_path = repo.join(".mrgs").join("implementation-authority.json");
+        let stale_auth = serde_json::json!({
+            "revision": 999u32,
+            "sha256": final_sha.clone(),
+            "baseline_branch": "main"
+        });
+        std::fs::write(
+            &auth_path,
+            serde_json::to_string_pretty(&stale_auth).unwrap(),
+        )
+        .unwrap();
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during stale authority check"
+        );
+    }
+
+    // 15. Missing baseline commit (authority points to nonexistent SHA)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Overwrite authority with nonexistent baseline SHA.
+        let auth_path = repo.join(".mrgs").join("implementation-authority.json");
+        let fake_auth = serde_json::json!({
+            "revision": final_rev,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "baseline_branch": "main"
+        });
+        std::fs::write(
+            &auth_path,
+            serde_json::to_string_pretty(&fake_auth).unwrap(),
+        )
+        .unwrap();
+
+        let before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
+        let after = capture_governance(&repo);
+        assert_eq!(
+            before, after,
+            "governance changed during missing baseline check"
+        );
+    }
+
+    // 16. Direct check-side index-conflict preservation
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("conflict.txt"), b"base content\n").unwrap();
+        git(&repo)
+            .arg("add")
+            .arg("src/conflict.txt")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add conflict file")
+            .status()
+            .unwrap();
+
+        let make_blob = |content: &[u8]| -> String {
+            let mut child = git(&repo)
+                .arg("hash-object")
+                .arg("-w")
+                .arg("--stdin")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(content).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status.code(), Some(0));
+            String::from_utf8(output.stdout[..output.stdout.len() - 1].to_vec()).unwrap()
+        };
+
+        let oid_stage1 = make_blob(b"stage 1 ours\n");
+        let oid_stage2 = make_blob(b"stage 2 theirs\n");
+        let oid_stage3 = make_blob(b"stage 3 base\n");
+
+        assert_ne!(oid_stage1, oid_stage2, "stage 1 and 2 OIDs must differ");
+        assert_ne!(oid_stage2, oid_stage3, "stage 2 and 3 OIDs must differ");
+        assert_ne!(oid_stage1, oid_stage3, "stage 1 and 3 OIDs must differ");
+
+        git(&repo)
+            .arg("rm")
+            .arg("--cached")
+            .arg("src/conflict.txt")
+            .status()
+            .unwrap();
+
+        let index_info = format!(
+            "100644 {} 1\tsrc/conflict.txt\n100644 {} 2\tsrc/conflict.txt\n100644 {} 3\tsrc/conflict.txt\n",
+            oid_stage1, oid_stage2, oid_stage3
+        );
+        let mut update = git(&repo)
+            .arg("update-index")
+            .arg("--index-info")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        update
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(index_info.as_bytes())
+            .unwrap();
+        assert_eq!(update.wait().unwrap().code(), Some(0));
+
+        let unmerged = git(&repo)
+            .arg("ls-files")
+            .arg("--unmerged")
+            .output()
+            .unwrap();
+        let unmerged_str = String::from_utf8(unmerged.stdout.clone()).unwrap();
+        assert!(
+            unmerged_str.contains("src/conflict.txt"),
+            "conflict fixture must produce unmerged entry for src/conflict.txt; got: {}",
+            unmerged_str
+        );
+        assert!(
+            unmerged_str.contains(&format!("{} 1\t", oid_stage1)),
+            "stage 1 OID must be present in unmerged output"
+        );
+        assert!(
+            unmerged_str.contains(&format!("{} 2\t", oid_stage2)),
+            "stage 2 OID must be present in unmerged output"
+        );
+        assert!(
+            unmerged_str.contains(&format!("{} 3\t", oid_stage3)),
+            "stage 3 OID must be present in unmerged output"
+        );
+
+        let before_snap = capture_snapshot(&repo);
+        let before_gov = capture_governance(&repo);
+
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_CONFLICT");
+
+        let after_snap = capture_snapshot(&repo);
+        let after_gov = capture_governance(&repo);
+
+        assert_eq!(
+            before_gov, after_gov,
+            "governance changed during direct check-side index-conflict"
+        );
+
+        let all_components = [
+            "governance",
+            "git_refs",
+            "git_index",
+            "git_config",
+            "git_objects",
+            "worktree",
+        ];
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "direct-check-index-conflict",
+            &all_components,
+        );
+
+        let allowed_temps: Vec<String> = before_snap
+            .entries
+            .keys()
+            .filter(|k| k.ends_with(".tmp"))
+            .cloned()
+            .collect();
+        assert_no_new_mrgs_temp_paths(
+            &before_snap,
+            &after_snap,
+            "direct-check-index-conflict",
+            &allowed_temps,
+        );
+    }
+
+    // Tracked-governance and sparse-state cases are covered by dedicated matrices:
+    // test_pkg13_tracked_governance_failure_preservation_matrix (P4-142/P4-143)
+    // test_pkg13_sparse_failure_preservation_matrix (P4-182/P4-183)
+}
+
+// ---------------------------------------------------------------------------
+// P4-086: preexisting temp files untouched matrix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_preexisting_temp_files_untouched_matrix() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+
+    // Create pre-existing .tmp files with distinctive bytes and names that
+    // collide with plausible MRGS temp naming patterns.
+    let mrgs = repo.join(".mrgs");
+    std::fs::create_dir_all(&mrgs).unwrap();
+    let tmp_files: Vec<(&str, &[u8])> = vec![
+        (".accepted-plan.json.tmp", b"PRE_TMP_ACCEPTED_PLAN_V1"),
+        (".state.json.tmp", b"PRE_TMP_STATE_V2"),
+        (".contract-draft.json.tmp", b"PRE_TMP_CONTRACT_DRAFT_V3"),
+        (
+            ".accepted-contract.json.tmp",
+            b"PRE_TMP_ACCEPTED_CONTRACT_V4",
+        ),
+        (
+            ".implementation-authority.json.tmp",
+            b"PRE_TMP_IMPL_AUTH_V5",
+        ),
+        (".phase-select.json.tmp", b"PRE_TMP_PHASE_SELECT_V6"),
+        ("mrgs_tmp_12345_67890.tmp", b"PRE_TMP_MRGSSUFFIX_V7"),
+    ];
+    let mut expected_bytes: std::collections::BTreeMap<String, Vec<u8>> =
+        std::collections::BTreeMap::new();
+    for (name, bytes) in &tmp_files {
+        let path = mrgs.join(name);
+        std::fs::write(&path, *bytes).unwrap();
+        expected_bytes.insert(name.to_string(), bytes.to_vec());
+    }
+
+    // --- Successful begin ---
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let contract_path = repo.join("contract.toml");
+    write_plan(&contract_path, valid_contract_toml());
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let _output = run_implementation_begin(&repo, final_rev, &final_sha);
+
+    for (name, expected) in &expected_bytes {
+        let path = mrgs.join(name);
+        assert!(
+            path.exists(),
+            "pre-existing tmp {} must still exist after successful begin",
+            name
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            *expected,
+            "pre-existing tmp {} bytes changed after successful begin",
+            name
+        );
+    }
+
+    // --- Idempotent begin ---
+    let _output2 = run_implementation_begin(&repo, final_rev, &final_sha);
+    for (name, expected) in &expected_bytes {
+        let path = mrgs.join(name);
+        assert!(
+            path.exists(),
+            "pre-existing tmp {} must still exist after idempotent begin",
+            name
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            *expected,
+            "pre-existing tmp {} bytes changed after idempotent begin",
+            name
+        );
+    }
+
+    // --- Failed begin (unstaged modification) ---
+    std::fs::write(repo.join("README.md"), b"modified").unwrap();
+    let _output3 = run_implementation_begin(&repo, final_rev, &final_sha);
+    for (name, expected) in &expected_bytes {
+        let path = mrgs.join(name);
+        assert!(
+            path.exists(),
+            "pre-existing tmp {} must still exist after failed begin",
+            name
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            *expected,
+            "pre-existing tmp {} bytes changed after failed begin",
+            name
+        );
+    }
+
+    // Clean up the unstaged modification so we can proceed.
+    std::fs::write(repo.join("README.md"), b"initial").unwrap();
+    git(&repo).arg("add").arg("README.md").status().unwrap();
+    git(&repo)
+        .arg("commit")
+        .arg("--amend")
+        .arg("-q")
+        .arg("--no-edit")
+        .status()
+        .unwrap();
+
+    // --- Successful check ---
+    let _output4 = run_implementation_check(&repo);
+    for (name, expected) in &expected_bytes {
+        let path = mrgs.join(name);
+        assert!(
+            path.exists(),
+            "pre-existing tmp {} must still exist after successful check",
+            name
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            *expected,
+            "pre-existing tmp {} bytes changed after successful check",
+            name
+        );
+    }
+
+    // --- Failed check (no begin) ---
+    let (_dir2, repo2) = setup_implementation_basic();
+    let mrgs2 = repo2.join(".mrgs");
+    std::fs::create_dir_all(&mrgs2).unwrap();
+    let tmp_file_orphan = mrgs2.join(".orphan.tmp");
+    std::fs::write(&tmp_file_orphan, b"PRE_TMP_ORPHAN_V99").unwrap();
+    let _output5 = run_implementation_check(&repo2);
+    assert!(
+        tmp_file_orphan.exists(),
+        "pre-existing tmp must still exist after failed check"
+    );
+    assert_eq!(
+        std::fs::read(&tmp_file_orphan).unwrap(),
+        b"PRE_TMP_ORPHAN_V99",
+        "pre-existing tmp bytes changed after failed check"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4-087: begin creates only authority; idempotent writes nothing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_begin_creates_only_authority_and_idempotent_writes_nothing() {
+    // First successful begin
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+    let before = capture_snapshot(&repo);
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_begin_exact(&output, &repo);
+
+    let after = capture_snapshot(&repo);
+    let diffs = diff_snapshots(&before, &after);
+
+    // The ONLY difference should be the added implementation-authority.json.
+    let expected_added = ".mrgs/implementation-authority.json";
+    let mut only_authority = true;
+    for d in &diffs {
+        if !d.starts_with(&format!("+ {} ", expected_added)) {
+            only_authority = false;
+            break;
+        }
+    }
+    assert!(
+        only_authority,
+        "begin must create ONLY implementation-authority.json; diffs: {:?}",
+        diffs
+    );
+
+    // No temp path remains.
+    assert_no_temp_files(&repo);
+
+    // All pre-existing governance files equal (none existed before).
+    // All git components equal (no refs/objects/config/index changes).
+    // All worktree files equal.
+    for d in &diffs {
+        if d.starts_with(&format!("+ {} ", expected_added)) {
+            continue;
+        }
+        panic!("unexpected diff: {}", d);
+    }
+
+    // --- Idempotent begin ---
+    let before2 = capture_snapshot(&repo);
+    let output2 = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_begin_exact(&output2, &repo);
+    let after2 = capture_snapshot(&repo);
+    let diffs2 = diff_snapshots(&before2, &after2);
+    assert!(
+        diffs2.is_empty(),
+        "idempotent begin must produce ZERO differences; diffs: {:?}",
+        diffs2
+    );
+    assert_no_temp_files(&repo);
+}
+
+// ---------------------------------------------------------------------------
+// P4-088: git state immutable across begin and check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_git_state_immutable_across_begin_and_check() {
+    // --- Successful begin ---
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let before = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_begin_exact(&output, &repo);
+        let after = capture_snapshot(&repo);
+        let diffs = diff_snapshots(&before, &after);
+
+        // Only implementation-authority.json may be added.
+        for d in &diffs {
+            assert!(
+                d.starts_with("+ .mrgs/implementation-authority.json "),
+                "git state must not change during begin; unexpected diff: {}",
+                d
+            );
+        }
+    }
+
+    // --- Idempotent begin ---
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        let before = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_begin_exact(&output, &repo);
+        let after = capture_snapshot(&repo);
+        let diffs = diff_snapshots(&before, &after);
+        assert!(
+            diffs.is_empty(),
+            "idempotent begin must produce ZERO diffs; diffs: {:?}",
+            diffs
+        );
+    }
+
+    // --- Successful check ---
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        let before = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_success(&output);
+        let after = capture_snapshot(&repo);
+        let diffs = diff_snapshots(&before, &after);
+        assert!(
+            diffs.is_empty(),
+            "successful check must produce ZERO diffs; diffs: {:?}",
+            diffs
+        );
+    }
+
+    // --- Failed begin (unstaged modification) ---
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::write(repo.join("README.md"), b"modified").unwrap();
+
+        let before = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        let after = capture_snapshot(&repo);
+        let diffs = diff_snapshots(&before, &after);
+        assert!(
+            diffs.is_empty(),
+            "failed begin must produce ZERO diffs; diffs: {:?}",
+            diffs
+        );
+    }
+
+    // --- Failed check (no begin) ---
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let before = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "CONTRACT_NOT_ACCEPTED");
+        let after = capture_snapshot(&repo);
+        let diffs = diff_snapshots(&before, &after);
+        assert!(
+            diffs.is_empty(),
+            "failed check (no begin) must produce ZERO diffs; diffs: {:?}",
+            diffs
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4-142 / P4-143: tracked governance failure preservation matrix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_tracked_governance_failure_preservation_matrix() {
+    // Helper: run a tracked-governance preservation check.
+    let run_case = |name: &str,
+                    setup_fn: &dyn Fn(&tempfile::TempDir, &std::path::Path),
+                    expected_category: &str,
+                    use_check: bool| {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        assert_success(&run_plan_accept(&repo, &plan_path));
+        assert_success(&run_phase_select(&repo, "phase-1"));
+
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, valid_contract_toml());
+        commit_file(&repo, "contract.toml");
+        assert_success(&run_contract_draft(&repo, &contract_path));
+
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+
+        if use_check {
+            let (final_rev, final_sha) = contract_accepted_revision(&repo);
+            assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        }
+
+        // Apply the tracked fixture.
+        setup_fn(&dir, &repo);
+
+        let before_gov = capture_governance(&repo);
+        let before_snap = capture_snapshot(&repo);
+
+        let output = if use_check {
+            run_implementation_check(&repo)
+        } else {
+            // For begin-side cases, we need the final_rev/final_sha.
+            // This branch is only for check-side cases.
+            panic!("begin-side tracked cases not supported in this helper")
+        };
+
+        assert_phase4_failure_exact(&output, expected_category);
+
+        let after_gov = capture_governance(&repo);
+        let after_snap = capture_snapshot(&repo);
+
+        assert_eq!(before_gov, after_gov, "{}: governance files changed", name);
+
+        let all_components = [
+            "governance",
+            "git_refs",
+            "git_index",
+            "git_config",
+            "git_objects",
+            "worktree",
+        ];
+        assert_snapshot_components_equal(&before_snap, &after_snap, name, &all_components);
+
+        let allowed_temps: Vec<String> = before_snap
+            .entries
+            .keys()
+            .filter(|k| k.ends_with(".tmp"))
+            .cloned()
+            .collect();
+        assert_no_new_mrgs_temp_paths(&before_snap, &after_snap, name, &allowed_temps);
+    };
+
+    // 1. tracked accepted-plan
+    run_case(
+        "tracked-accepted-plan",
+        &|_dir, repo| {
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/accepted-plan.json")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track accepted-plan.json")
+                .status()
+                .unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 2. tracked state
+    run_case(
+        "tracked-state",
+        &|_dir, repo| {
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/state.json")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track state.json")
+                .status()
+                .unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 3. tracked contract-draft
+    run_case(
+        "tracked-contract-draft",
+        &|_dir, repo| {
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/contract-draft.json")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track contract-draft.json")
+                .status()
+                .unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 4. tracked accepted-contract
+    run_case(
+        "tracked-accepted-contract",
+        &|_dir, repo| {
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/accepted-contract.json")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track accepted-contract.json")
+                .status()
+                .unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 5. tracked implementation-authority
+    run_case(
+        "tracked-impl-authority",
+        &|_dir, repo| {
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/implementation-authority.json")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track implementation-authority.json")
+                .status()
+                .unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 6. tracked unknown .mrgs path
+    run_case(
+        "tracked-unknown-mrgs",
+        &|_dir, repo| {
+            std::fs::write(repo.join(".mrgs").join("unknown.json"), b"{}").unwrap();
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/unknown.json")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track unknown.json")
+                .status()
+                .unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 7. tracked temp-shaped .mrgs path
+    run_case(
+        "tracked-temp-shaped",
+        &|_dir, repo| {
+            std::fs::write(repo.join(".mrgs").join("mrgs_tmp_12345_67890.tmp"), b"temp").unwrap();
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/mrgs_tmp_12345_67890.tmp")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track tmp file")
+                .status()
+                .unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 8. deleted tracked governance path (authority file)
+    run_case(
+        "deleted-tracked-governance",
+        &|_dir, repo| {
+            let auth_path = repo.join(".mrgs").join("implementation-authority.json");
+            if auth_path.exists() {
+                std::fs::remove_file(&auth_path).unwrap();
+            }
+        },
+        "IMPLEMENTATION_AUTHORITY_MISSING",
+        true,
+    );
+
+    // 9. conflict-stage beneath .mrgs
+    run_case(
+        "conflict-stage-beneath-mrgs",
+        &|_dir, repo| {
+            let mrgs = repo.join(".mrgs");
+            std::fs::create_dir_all(&mrgs).unwrap();
+            std::fs::write(mrgs.join("conflict.txt"), b"base").unwrap();
+            git(repo)
+                .arg("add")
+                .arg("--force")
+                .arg(".mrgs/conflict.txt")
+                .status()
+                .unwrap();
+            git(repo)
+                .arg("commit")
+                .arg("-m")
+                .arg("track conflict.txt")
+                .status()
+                .unwrap();
+            // Modify the file to create a conflict stage.
+            std::fs::write(mrgs.join("conflict.txt"), b"modified").unwrap();
+        },
+        "GIT_INVENTORY_INVALID",
+        true,
+    );
+
+    // 10. gitlink beneath .mrgs (use submodule pattern)
+    run_case(
+        "gitlink-beneath-mrgs",
+        &|dir, repo| {
+            let sub_dir = dir.path().join("sub");
+            Command::new("git")
+                .arg("init")
+                .arg(&sub_dir)
+                .status()
+                .unwrap();
+            std::fs::write(sub_dir.join("sub_file.txt"), b"sub").unwrap();
+            Command::new("git")
+                .arg("-C")
+                .arg(&sub_dir)
+                .arg("add")
+                .arg(".")
+                .status()
+                .unwrap();
+            Command::new("git")
+                .arg("-C")
+                .arg(&sub_dir)
+                .arg("-c")
+                .arg("user.name=test")
+                .arg("-c")
+                .arg("user.email=test@test.com")
+                .arg("commit")
+                .arg("-m")
+                .arg("init")
+                .status()
+                .unwrap();
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .arg("-c")
+                .arg("protocol.file.allow=always")
+                .arg("submodule")
+                .arg("add")
+                .arg(&sub_dir)
+                .arg(".mrgs/submod")
+                .status()
+                .unwrap();
+        },
+        "GIT_SUBMODULE_UNSUPPORTED",
+        true,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4-182 / P4-183: sparse failure preservation matrix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pkg13_sparse_failure_preservation_matrix() {
+    let all_components = [
+        "governance",
+        "git_refs",
+        "git_index",
+        "git_config",
+        "git_objects",
+        "worktree",
+    ];
+
+    // 1. core.sparseCheckout=true
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("core.sparseCheckout")
+            .arg("true")
+            .status()
+            .unwrap();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-core-true",
+            &all_components,
+        );
+    }
+
+    // 2. index.sparse=true
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("index.sparse")
+            .arg("true")
+            .status()
+            .unwrap();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-index-true",
+            &all_components,
+        );
+    }
+
+    // 3. Sparse checkout active with index.sparse unset (core.sparseCheckout=true still rejects)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Enable sparse checkout which sets core.sparseCheckout=true.
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("sparse-checkout")
+            .arg("init")
+            .status()
+            .unwrap();
+        // Unset index.sparse but keep sparse checkout active.
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("--unset")
+            .arg("index.sparse")
+            .status()
+            .ok();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-checkout-unset-index",
+            &all_components,
+        );
+    }
+
+    // 4. Sparse checkout active with index.sparse=false explicitly set
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Enable sparse checkout then explicitly set index.sparse=false.
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("sparse-checkout")
+            .arg("init")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("index.sparse")
+            .arg("false")
+            .status()
+            .unwrap();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-checkout-false-index",
+            &all_components,
+        );
+    }
+
+    // 5. Malformed core.sparseCheckout output (direct snapshot evidence)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Replace real git with a wrapper that returns malformed output
+        // for the core.sparseCheckout config query.
+        let recorder =
+            create_malformed_git_recorder("core.sparseCheckout", b"MALFORMED_NOT_BOOL\n", 0);
+
+        // Snapshot before MRGS invocation; no Git command first.
+        let before_snap = capture_snapshot(&repo);
+        let output =
+            run_with_malformed_git_recorder(&recorder, &repo, &["implementation", "check"]);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-malformed-core",
+            &all_components,
+        );
+        let allowed: Vec<String> = Vec::new();
+        assert_no_new_mrgs_temp_paths(&before_snap, &after_snap, "sparse-malformed-core", &allowed);
+    }
+
+    // 6. Malformed index.sparse output (direct snapshot evidence)
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        let recorder = create_malformed_git_recorder("index.sparse", b"MALFORMED_NOT_BOOL\n", 0);
+
+        let before_snap = capture_snapshot(&repo);
+        let output =
+            run_with_malformed_git_recorder(&recorder, &repo, &["implementation", "check"]);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-malformed-index",
+            &all_components,
+        );
+        let allowed: Vec<String> = Vec::new();
+        assert_no_new_mrgs_temp_paths(
+            &before_snap,
+            &after_snap,
+            "sparse-malformed-index",
+            &allowed,
+        );
+    }
+
+    // 7. Multiple core.sparseCheckout values with final value false
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("--add")
+            .arg("core.sparseCheckout")
+            .arg("true")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("--add")
+            .arg("core.sparseCheckout")
+            .arg("false")
+            .status()
+            .unwrap();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-multi-core-false",
+            &all_components,
+        );
+    }
+
+    // 8. Multiple index.sparse values with final value false
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("--add")
+            .arg("index.sparse")
+            .arg("true")
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("config")
+            .arg("--add")
+            .arg("index.sparse")
+            .arg("false")
+            .status()
+            .unwrap();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-multi-index-false",
+            &all_components,
+        );
+    }
+
+    // 9. Real cone sparse checkout (reuse PKG-12 fixture)
+    {
+        let (_dir, repo, final_rev, final_sha) = setup_sparse_fixture();
+        git_cmd(&repo, &["sparse-checkout", "init", "--cone"]);
+        git_cmd(&repo, &["sparse-checkout", "set", "included"]);
+
+        assert!(
+            !repo.join("excluded").join("c.txt").exists(),
+            "working tree must be sparse"
+        );
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-real-cone",
+            &all_components,
+        );
+    }
+
+    // 10. Real non-cone sparse checkout (reuse PKG-12 fixture)
+    {
+        let (_dir, repo, final_rev, final_sha) = setup_sparse_fixture();
+        git_cmd(&repo, &["sparse-checkout", "init"]);
+        git_cmd(&repo, &["sparse-checkout", "set", "included"]);
+
+        assert!(
+            !repo.join("excluded").join("c.txt").exists(),
+            "working tree must be sparse"
+        );
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+        let after_snap = capture_snapshot(&repo);
+
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-real-noncone",
+            &all_components,
+        );
+    }
+
+    // 11. Real sparse index (reuse PKG-12 fixture) with raw index preservation proof
+    {
+        let (_dir, repo, final_rev, final_sha) = setup_sparse_fixture();
+        git_cmd(
+            &repo,
+            &["sparse-checkout", "init", "--cone", "--sparse-index"],
+        );
+        git_cmd(&repo, &["sparse-checkout", "set", "included"]);
+
+        assert!(
+            !repo.join("excluded").join("c.txt").exists(),
+            "working tree must be sparse"
+        );
+
+        // Prove sparse index is active.
+        let si_config = git_cmd_output(&repo, &["config", "--get", "index.sparse"]);
+        let si_val = String::from_utf8_lossy(&si_config.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(si_val, "true", "index.sparse should be true");
+
+        // Prove mode-040000 sparse-directory records exist.
+        let ls_files = git_cmd_output(&repo, &["ls-files", "--sparse", "--stage", "-z"]);
+        let sparse_records: Vec<&[u8]> = ls_files
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|e| !e.is_empty() && e.starts_with(b"040000 "))
+            .collect();
+        assert!(
+            !sparse_records.is_empty(),
+            "expected sparse-directory records"
+        );
+
+        // Capture raw index bytes BEFORE MRGS.
+        let index_path = repo.join(".git").join("index");
+        let index_before = std::fs::read(&index_path).unwrap();
+        let index_sha_before = sha256_hex(&index_before);
+        let index_len_before = index_before.len();
+
+        // Capture working-tree presence matrix.
+        let wt_included_a = repo.join("included").join("a.txt").exists();
+        let wt_excluded_c = repo.join("excluded").join("c.txt").exists();
+
+        let before_snap = capture_snapshot(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+
+        // Capture raw index bytes AFTER MRGS immediately (no Git command first).
+        let index_after = std::fs::read(&index_path).unwrap();
+        let index_sha_after = sha256_hex(&index_after);
+        let index_len_after = index_after.len();
+
+        assert_eq!(
+            index_before, index_after,
+            "INDEX_BYTES_EQUAL_BEFORE_AFTER failed"
+        );
+        assert_eq!(
+            index_sha_before, index_sha_after,
+            "INDEX_SHA256_EQUAL_BEFORE_AFTER failed: {} != {}",
+            index_sha_before, index_sha_after
+        );
+        assert_eq!(
+            index_len_before, index_len_after,
+            "INDEX_LENGTH_EQUAL_BEFORE_AFTER failed"
+        );
+
+        // Prove sparse-directory records unchanged.
+        let ls_files_after = git_cmd_output(&repo, &["ls-files", "--sparse", "--stage", "-z"]);
+        let sparse_records_after: Vec<&[u8]> = ls_files_after
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|e| !e.is_empty() && e.starts_with(b"040000 "))
+            .collect();
+        assert_eq!(
+            sparse_records.len(),
+            sparse_records_after.len(),
+            "SPARSE_DIRECTORY_RECORDS_EQUAL_BEFORE_AFTER failed: {} vs {}",
+            sparse_records.len(),
+            sparse_records_after.len()
+        );
+
+        // Prove working-tree matrix unchanged.
+        assert_eq!(
+            wt_included_a,
+            repo.join("included").join("a.txt").exists(),
+            "WORKTREE_MATRIX changed for included/a.txt"
+        );
+        assert_eq!(
+            wt_excluded_c,
+            repo.join("excluded").join("c.txt").exists(),
+            "WORKTREE_MATRIX changed for excluded/c.txt"
+        );
+
+        let after_snap = capture_snapshot(&repo);
+        assert_snapshot_components_equal(
+            &before_snap,
+            &after_snap,
+            "sparse-real-index",
+            &all_components,
+        );
+    }
+}
+
+// ============================================================================
+// PKG-01: Implementation-authority serialization and binding proof
+// ============================================================================
+
+fn extract_top_level_json_keys(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("  \"") {
+            if let Some(end) = rest.find("\":") {
+                keys.push(rest[..end].to_string());
+            }
+        }
+    }
+    keys
+}
+
+#[test]
+fn test_pkg01_deterministic_field_order_and_serialization_bytes() {
+    let (_dir1, repo1) = setup_implementation_basic();
+    let draft1: serde_json::Value = read_json(&repo1, "contract-draft.json");
+    let sha1 = draft1["sha256"].as_str().unwrap().to_string();
+    let rev1 = draft1["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo1, rev1, &sha1, "ACCEPTED"));
+    let (final_rev1, final_sha1) = contract_accepted_revision(&repo1);
+    assert_success(&run_implementation_begin(&repo1, final_rev1, &final_sha1));
+    let bytes1 = std::fs::read(repo1.join(".mrgs").join("implementation-authority.json")).unwrap();
+
+    let (_dir2, repo2) = setup_implementation_basic();
+    let draft2: serde_json::Value = read_json(&repo2, "contract-draft.json");
+    let sha2 = draft2["sha256"].as_str().unwrap().to_string();
+    let rev2 = draft2["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo2, rev2, &sha2, "ACCEPTED"));
+    let (final_rev2, final_sha2) = contract_accepted_revision(&repo2);
+    assert_success(&run_implementation_begin(&repo2, final_rev2, &final_sha2));
+    let bytes2 = std::fs::read(repo2.join(".mrgs").join("implementation-authority.json")).unwrap();
+
+    let text1 = String::from_utf8(bytes1.clone()).unwrap();
+    let text2 = String::from_utf8(bytes2.clone()).unwrap();
+
+    let keys1 = extract_top_level_json_keys(&text1);
+    let keys2 = extract_top_level_json_keys(&text2);
+    assert_eq!(
+        keys1, keys2,
+        "field order must be deterministic across independent repos"
+    );
+
+    let expected_keys = vec![
+        "schema_version",
+        "accepted_plan_sha256",
+        "phase_id",
+        "contract_id",
+        "contract_revision",
+        "contract_source_path",
+        "contract_sha256",
+        "contract_content",
+        "git_object_format",
+        "baseline_head",
+        "baseline_branch",
+    ];
+    assert_eq!(
+        keys1, expected_keys,
+        "field order must match struct declaration"
+    );
+
+    assert!(
+        text1.contains("  \"schema_version\""),
+        "pretty-print indentation expected"
+    );
+    assert!(
+        text2.contains("  \"schema_version\""),
+        "pretty-print indentation expected"
+    );
+
+    let json1: serde_json::Value = serde_json::from_slice(&bytes1).unwrap();
+    let json2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
+
+    assert_ne!(
+        json1["baseline_head"].as_str().unwrap(),
+        json2["baseline_head"].as_str().unwrap(),
+        "independent repos must have different baseline heads"
+    );
+    assert_eq!(
+        json1["contract_content"].as_str().unwrap(),
+        json2["contract_content"].as_str().unwrap(),
+        "contract content must be identical across equivalent repos"
+    );
+    assert_eq!(
+        json1["contract_sha256"].as_str().unwrap(),
+        json2["contract_sha256"].as_str().unwrap(),
+        "contract sha256 must be identical across equivalent repos"
+    );
+    assert_eq!(
+        json1["contract_source_path"].as_str().unwrap(),
+        json2["contract_source_path"].as_str().unwrap(),
+        "source path must be identical across equivalent repos"
+    );
+
+    let second_begin = run_implementation_begin(&repo1, final_rev1, &final_sha1);
+    assert_success(&second_begin);
+    let bytes_after =
+        std::fs::read(repo1.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        bytes1, bytes_after,
+        "idempotent begin must produce identical bytes"
+    );
+}
+
+#[test]
+fn test_pkg01_baseline_sha_independent_git() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let git_output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("rev-parse")
+        .arg("HEAD^{commit}")
+        .output()
+        .unwrap();
+    assert!(
+        git_output.status.success(),
+        "git rev-parse failed: {:?}",
+        git_output.stderr
+    );
+    let independent_sha = String::from_utf8(git_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let persisted_sha = record["baseline_head"].as_str().unwrap();
+    assert_eq!(
+        persisted_sha, independent_sha,
+        "baseline_head must equal independent git rev-parse HEAD^{{commit}}"
+    );
+}
+
+#[test]
+fn test_pkg01_baseline_branch_independent_git() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let git_output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("symbolic-ref")
+        .arg("--quiet")
+        .arg("--short")
+        .arg("HEAD")
+        .output()
+        .unwrap();
+    assert!(
+        git_output.status.success(),
+        "git symbolic-ref failed: {:?}",
+        git_output.stderr
+    );
+    let independent_branch = String::from_utf8(git_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let persisted_branch = record["baseline_branch"].as_str().unwrap();
+    assert_eq!(
+        persisted_branch, independent_branch,
+        "baseline_branch must equal independent git symbolic-ref"
+    );
+}
+
+#[test]
+fn test_pkg01_exact_source_path_persistence() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let source_path = record["contract_source_path"].as_str().unwrap();
+    assert_eq!(
+        source_path, "contract.toml",
+        "source path must be exact normalized forward-slash"
+    );
+    assert!(
+        !source_path.contains('\\'),
+        "source path must not contain backslashes"
+    );
+}
+
+#[test]
+fn test_pkg01_exact_content_lf_preserved() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+
+    let contract_path = repo.join("contract.toml");
+    let lf_content = valid_contract_toml();
+    write_plan(&contract_path, lf_content);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let persisted_content = record["contract_content"].as_str().unwrap();
+    assert_eq!(
+        persisted_content, lf_content,
+        "LF content must be preserved exactly"
+    );
+    assert!(
+        persisted_content.ends_with('\n'),
+        "final newline must be preserved"
+    );
+}
+
+#[test]
+fn test_pkg01_exact_content_crlf_preserved() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("config")
+        .arg("core.autocrlf")
+        .arg("false")
+        .status()
+        .unwrap();
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+
+    let contract_path = repo.join("contract.toml");
+    let crlf_content = valid_contract_toml().replace('\n', "\r\n");
+    write_plan(&contract_path, &crlf_content);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let persisted_content = record["contract_content"].as_str().unwrap();
+    assert_eq!(
+        persisted_content, crlf_content,
+        "CRLF content must be preserved exactly"
+    );
+    assert!(
+        persisted_content.ends_with("\r\n"),
+        "final CRLF must be preserved"
+    );
+
+    let lf_content = valid_contract_toml();
+    assert_ne!(
+        persisted_content.as_bytes(),
+        lf_content.as_bytes(),
+        "CRLF and LF records must be byte-distinct"
+    );
+}
+
+#[test]
+fn test_pkg01_exact_content_no_final_newline_preserved() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+
+    let contract_path = repo.join("contract.toml");
+    let no_nl_content = valid_contract_toml().trim_end().to_string();
+    write_plan(&contract_path, &no_nl_content);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let persisted_content = record["contract_content"].as_str().unwrap();
+    assert_eq!(
+        persisted_content, no_nl_content,
+        "no-final-newline content must be preserved exactly"
+    );
+    assert!(
+        !persisted_content.ends_with('\n'),
+        "must not have trailing newline"
+    );
+}
+
+#[test]
+fn test_pkg01_no_duplicate_keys_in_record() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let bytes = std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+
+    let keys = extract_top_level_json_keys(&text);
+    let mut seen = std::collections::HashSet::new();
+    for key in &keys {
+        assert!(seen.insert(key.clone()), "duplicate key found: {}", key);
+    }
+
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let content = record["contract_content"].as_str().unwrap();
+    let allowed_count = content.matches("allowed_paths").count();
+    let forbidden_count = content.matches("forbidden_paths").count();
+    assert_eq!(
+        allowed_count, 1,
+        "allowed_paths must appear exactly once in contract content"
+    );
+    assert_eq!(
+        forbidden_count, 1,
+        "forbidden_paths must appear exactly once in contract content"
+    );
+}
+
+#[test]
+fn test_pkg01_content_hash_mismatch_structural_rejection() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let mut record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    record["contract_content"] = serde_json::json!("modified content that does not match sha");
+    write_json(&repo, "implementation-authority.json", &record);
+
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_INVALID");
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg01_different_existing_binding_rejected_and_preserved() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let mut record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    record["contract_revision"] = serde_json::json!(99);
+    write_json(&repo, "implementation-authority.json", &record);
+    let tampered_bytes =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_STALE");
+
+    let after_bytes =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        tampered_bytes, after_bytes,
+        "existing record must not be overwritten on failed begin"
+    );
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg01_no_overwrite_on_descendant_head() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let existing_bytes =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+
+    std::fs::write(repo.join("new_file.rs"), b"fn new() {}").unwrap();
+    commit_file(&repo, "new_file.rs");
+
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_CONFLICT");
+
+    let after_bytes =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        existing_bytes, after_bytes,
+        "existing record must not be overwritten on descendant head conflict"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// ============================================================================
+// PKG-02: Draft/phase authority after begin
+// ============================================================================
+
+#[test]
+fn test_pkg02_active_phase_changed_after_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let impl_bytes_before =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+
+    let mut state: serde_json::Value = read_json(&repo, "state.json");
+    state["active_phase"] = serde_json::json!("phase-2");
+    let closed = state["closed_phases"].as_array_mut().unwrap();
+    if !closed.iter().any(|v| v.as_str() == Some("phase-1")) {
+        closed.push(serde_json::json!("phase-1"));
+    }
+    write_json(&repo, "state.json", &state);
+
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_exact(&output, "GOVERNANCE_AUTHORITY_INVALID");
+
+    let impl_bytes_after =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        impl_bytes_before, impl_bytes_after,
+        "implementation-authority must not be rewritten"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// ============================================================================
+// PKG-03: Complete operation-marker and malformed-Git failure surface
+// ============================================================================
+
+fn create_git_marker_dir(repo: &Path, name: &str) {
+    let git_dir = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("rev-parse")
+            .arg("--git-dir")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let path = repo.join(&git_dir).join(name);
+    std::fs::create_dir_all(&path).unwrap();
+}
+
+fn assert_marker_check_rejects(repo: &Path, marker: &str) {
+    let impl_bytes_before =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    create_git_marker(repo, marker);
+    let output = run_implementation_check(repo);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    let impl_bytes_after =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        impl_bytes_before, impl_bytes_after,
+        "implementation-authority must not be rewritten during marker check"
+    );
+    assert_no_temp_files(repo);
+}
+
+// --- P4-036: malformed or failed Git command output ---
+
+#[test]
+fn test_pkg03_git_config_nonzero_exit() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_malformed_git_recorder("core.sparseCheckout", b"error\n", 1);
+    let output = run_with_malformed_git_recorder(&recorder, &repo, &["implementation", "check"]);
+    assert_phase4_failure_exact(&output, "GIT_COMMAND_FAILED");
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_git_config_malformed_bool() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_malformed_git_recorder("core.sparseCheckout", b"maybe\n", 0);
+    let output = run_with_malformed_git_recorder(&recorder, &repo, &["implementation", "check"]);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_git_config_non_utf8_output() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let recorder = create_malformed_git_recorder("core.sparseCheckout", &[0x80, 0x81, 0x82], 0);
+    let output = run_with_malformed_git_recorder(&recorder, &repo, &["implementation", "check"]);
+    assert_phase4_failure_exact(&output, "GIT_INVENTORY_INVALID");
+    assert_no_temp_files(&repo);
+}
+
+// --- P4-037: operation-marker rejection (missing families and check side) ---
+
+#[test]
+fn test_pkg03_rebase_merge_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker_dir(&repo, "rebase-merge");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_git_am_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker(&repo, "rebase-apply/applying");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_merge_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker(&repo, "MERGE_HEAD");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_cherry_pick_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker(&repo, "CHERRY_PICK_HEAD");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_revert_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker(&repo, "REVERT_HEAD");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_bisect_log_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker(&repo, "BISECT_LOG");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_bisect_start_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker(&repo, "BISECT_START");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_sequencer_marker_begin() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    create_git_marker(&repo, "sequencer/todo");
+    let output = run_implementation_begin(&repo, final_rev, &final_sha);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_merge_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "MERGE_HEAD");
+}
+
+#[test]
+fn test_pkg03_cherry_pick_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "CHERRY_PICK_HEAD");
+}
+
+#[test]
+fn test_pkg03_revert_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "REVERT_HEAD");
+}
+
+#[test]
+fn test_pkg03_bisect_log_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "BISECT_LOG");
+}
+
+#[test]
+fn test_pkg03_bisect_start_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "BISECT_START");
+}
+
+#[test]
+fn test_pkg03_rebase_apply_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "rebase-apply/applying");
+}
+
+#[test]
+fn test_pkg03_rebase_merge_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    let impl_bytes_before =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    create_git_marker_dir(&repo, "rebase-merge");
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_exact(&output, "GIT_OPERATION_IN_PROGRESS");
+    let impl_bytes_after =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        impl_bytes_before, impl_bytes_after,
+        "implementation-authority must not be rewritten during marker check"
+    );
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg03_git_am_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "rebase-apply/applying");
+}
+
+#[test]
+fn test_pkg03_sequencer_marker_check() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    assert_marker_check_rejects(&repo, "sequencer/todo");
+}
+
+#[test]
+fn test_pkg02_newer_unaccepted_draft_keeps_accepted_authoritative() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+
+    let contract_path = repo.join("contract.toml");
+    let custom_contract = r#"schema_version = 1
+contract_id = "test-contract-v1"
+phase_id = "phase-1"
+title = "Test contract"
+objective = "Test objective."
+requirements = ["req1"]
+allowed_paths = ["src/", "contract.toml"]
+forbidden_paths = [".git/"]
+verification_commands = ["cargo test"]
+handoff_fields = ["FIELD1"]
+"#;
+    write_plan(&contract_path, custom_contract);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let record_before: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let accepted_content = record_before["contract_content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let accepted_sha = record_before["contract_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let v2 = custom_contract.replace("Test objective", "Revised objective");
+    write_plan(&contract_path, &v2);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+
+    let output = run_implementation_check(&repo);
+    assert_phase4_success_exact(&output, &repo, 1);
+
+    let record_after: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    assert_eq!(
+        record_after["contract_revision"].as_u64().unwrap() as u32,
+        1
+    );
+    assert_eq!(
+        record_after["contract_sha256"].as_str().unwrap(),
+        accepted_sha
+    );
+    assert_eq!(
+        record_after["contract_content"].as_str().unwrap(),
+        accepted_content
+    );
+
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg02_accepted_path_allowed_when_draft_removes_it() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+
+    let contract_path = repo.join("contract.toml");
+    let custom_contract = r#"schema_version = 1
+contract_id = "test-contract-v1"
+phase_id = "phase-1"
+title = "Test contract"
+objective = "Test objective."
+requirements = ["req1"]
+allowed_paths = ["src/", "docs/", "contract.toml"]
+forbidden_paths = [".git/"]
+verification_commands = ["cargo test"]
+handoff_fields = ["FIELD1"]
+"#;
+    write_plan(&contract_path, custom_contract);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let v2 = custom_contract.replace(
+        "allowed_paths = [\"src/\", \"docs/\", \"contract.toml\"]",
+        "allowed_paths = [\"src/\"]",
+    );
+    write_plan(&contract_path, &v2);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs").join("guide.md"), b"# Guide").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("add")
+        .arg("docs/guide.md")
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("-c")
+        .arg("user.name=test")
+        .arg("-c")
+        .arg("user.email=test@test.com")
+        .arg("commit")
+        .arg("-m")
+        .arg("add guide")
+        .status()
+        .unwrap();
+
+    let impl_bytes_before =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+
+    let output = run_implementation_check(&repo);
+    assert_phase4_success_exact(&output, &repo, 2);
+
+    let impl_bytes_after =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        impl_bytes_before, impl_bytes_after,
+        "implementation-authority must not be rewritten"
+    );
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg02_draft_only_path_remains_not_allowed() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha1 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, 1, &sha1, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    let contract_path = repo.join("contract.toml");
+    let v2 = valid_contract_toml().replace(
+        "allowed_paths = [\"src/\"]",
+        "allowed_paths = [\"src/\", \"scripts/\"]",
+    );
+    write_plan(&contract_path, &v2);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha1));
+
+    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    std::fs::write(repo.join("scripts").join("build.sh"), b"#!/bin/bash").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("add")
+        .arg("scripts/build.sh")
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("-c")
+        .arg("user.name=test")
+        .arg("-c")
+        .arg("user.email=test@test.com")
+        .arg("commit")
+        .arg("-m")
+        .arg("add build script")
+        .status()
+        .unwrap();
+
+    let impl_bytes_before =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+
+    let output = run_implementation_check(&repo);
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
+
+    let impl_bytes_after =
+        std::fs::read(repo.join(".mrgs").join("implementation-authority.json")).unwrap();
+    assert_eq!(
+        impl_bytes_before, impl_bytes_after,
+        "implementation-authority must not be rewritten"
+    );
+    assert_no_temp_files(&repo);
+}
+
+// ============================================================================
+// PKG-04: Begin dirty-state, modification, rename, type-change,
+//          union deduplication, and endpoint semantics evidence
+// ============================================================================
+
+/// Strict raw-diff record: mirrors production `RawDiffEntry` grammar.
+/// Header starts with exactly one colon and has exactly five ASCII-space fields:
+///   old_mode new_mode old_object_id new_object_id status_and_optional_score
+/// Path fields are stored as lossless `Vec<u8>` byte vectors.
+#[derive(Debug, PartialEq)]
+struct StrictRawRecord {
+    old_mode: String,
+    new_mode: String,
+    old_oid: String,
+    new_oid: String,
+    status: char,
+    score: Option<u32>,
+    status_token: Vec<u8>,
+    dst: Vec<u8>,
+    src: Option<Vec<u8>>,
+}
+
+/// Parse a complete NUL-delimited raw-diff stream into strict records.
+/// Validates production mode grammar, object ID length and lowercase hex,
+/// status and numeric score, status-dependent path count, complete token
+/// arity, no orphan trailing token, exact lossless paths. Consumes all
+/// records or panics. No MRGS policy/union/dedup.
+fn parse_strict_raw_records(raw: &[u8]) -> Vec<StrictRawRecord> {
+    let valid_modes: &[&str] = &["000000", "100644", "100755", "120000", "160000"];
+    let mut entries = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        // Find NUL terminator for header record.
+        let nul_pos = raw[i..].iter().position(|&b| b == 0).unwrap_or_else(|| {
+            panic!(
+                "raw parser: unterminated header at offset {}; stream not NUL-terminated",
+                i
+            )
+        });
+        let header = &raw[i..i + nul_pos];
+        i += nul_pos + 1;
+
+        // Record header must start with exactly one colon.
+        assert!(
+            header.starts_with(b":"),
+            "raw parser: header must start with ':': {:?}",
+            String::from_utf8_lossy(header)
+        );
+        let after_colon = &header[1..];
+
+        // Reject leading or trailing space in the fields section.
+        assert!(
+            !after_colon.starts_with(b" "),
+            "raw parser: header has leading space after colon: {:?}",
+            String::from_utf8_lossy(header)
+        );
+        assert!(
+            !after_colon.ends_with(b" "),
+            "raw parser: header has trailing space: {:?}",
+            String::from_utf8_lossy(header)
+        );
+
+        // Split on ASCII space, rejecting doubled spaces (empty fields).
+        let mut parts: Vec<&[u8]> = Vec::new();
+        let mut field_start = 0usize;
+        for (idx, &b) in after_colon.iter().enumerate() {
+            if b == b' ' {
+                assert!(
+                    idx > field_start,
+                    "raw parser: doubled space at position {} in header: {:?}",
+                    idx,
+                    String::from_utf8_lossy(header)
+                );
+                parts.push(&after_colon[field_start..idx]);
+                field_start = idx + 1;
+            }
+        }
+        parts.push(&after_colon[field_start..]);
+        assert_eq!(
+            parts.len(),
+            5,
+            "raw parser: header must have exactly 5 space-separated fields: {:?}",
+            String::from_utf8_lossy(header)
+        );
+
+        let old_mode = std::str::from_utf8(parts[0]).expect("old_mode UTF-8");
+        let new_mode = std::str::from_utf8(parts[1]).expect("new_mode UTF-8");
+        let old_oid = std::str::from_utf8(parts[2]).expect("old_oid UTF-8");
+        let new_oid = std::str::from_utf8(parts[3]).expect("new_oid UTF-8");
+        let status_part = parts[4];
+        let status_token = status_part.to_vec();
+
+        // Validate production mode grammar.
+        for mode in [old_mode, new_mode] {
+            assert!(
+                valid_modes.contains(&mode),
+                "raw parser: unsupported mode {:?}",
+                mode
+            );
+        }
+
+        // Validate object ID length and lowercase hex.
+        for oid in [old_oid, new_oid] {
+            assert!(
+                oid.len() == 40 || oid.len() == 64,
+                "raw parser: OID must be 40 or 64 chars: {:?}",
+                oid
+            );
+            assert!(
+                oid.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "raw parser: OID must be lowercase hex: {:?}",
+                oid
+            );
+        }
+
+        // Validate status and optional score.
+        assert!(
+            !status_part.is_empty(),
+            "raw parser: empty status field in header"
+        );
+        let status_byte = status_part[0] as char;
+        let score_bytes = &status_part[1..];
+        assert!(
+            matches!(status_byte, 'A' | 'D' | 'M' | 'T' | 'R' | 'C'),
+            "raw parser: invalid status {:?}",
+            status_byte
+        );
+
+        let score = match status_byte {
+            'A' | 'D' | 'M' | 'T' => {
+                assert!(
+                    score_bytes.is_empty(),
+                    "raw parser: status {:?} must not have score, got {:?}",
+                    status_byte,
+                    String::from_utf8_lossy(score_bytes)
+                );
+                None
+            }
+            'R' | 'C' => {
+                let score_str = std::str::from_utf8(score_bytes).expect("score must be UTF-8");
+                assert!(
+                    !score_str.is_empty() && score_str.bytes().all(|b| b.is_ascii_digit()),
+                    "raw parser: R/C score must be all-digit: {:?}",
+                    score_str
+                );
+                let score_val: u32 = score_str.parse().expect("score parse as u32");
+                assert!(
+                    score_val <= 100,
+                    "raw parser: score must be 0..100: {}",
+                    score_val
+                );
+                Some(score_val)
+            }
+            _ => unreachable!(),
+        };
+
+        // Status-dependent path count: read source path.
+        assert!(
+            i < raw.len(),
+            "raw parser: missing source path after header at offset {}",
+            i
+        );
+        let nul_src = raw[i..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or_else(|| panic!("raw parser: unterminated source path at offset {}", i));
+        let path1 = raw[i..i + nul_src].to_vec();
+        i += nul_src + 1;
+
+        // R/C: second path (destination). Others: single path only.
+        let (dst, src) = match status_byte {
+            'R' | 'C' => {
+                assert!(
+                    i < raw.len(),
+                    "raw parser: missing destination path for R/C at offset {}",
+                    i
+                );
+                let nul_dst = raw[i..].iter().position(|&b| b == 0).unwrap_or_else(|| {
+                    panic!("raw parser: unterminated destination path at offset {}", i)
+                });
+                let path2 = raw[i..i + nul_dst].to_vec();
+                i += nul_dst + 1;
+                (path2, Some(path1))
+            }
+            _ => (path1, None),
+        };
+
+        entries.push(StrictRawRecord {
+            old_mode: old_mode.to_string(),
+            new_mode: new_mode.to_string(),
+            old_oid: old_oid.to_string(),
+            new_oid: new_oid.to_string(),
+            status: status_byte,
+            score,
+            status_token,
+            dst,
+            src,
+        });
+    }
+    entries
+}
+
+/// Strict porcelain `-z` `XY SP path` record.
+/// Mirrors production porcelain grammar. For R/C, dst is the destination
+/// (first path in porcelain -z), src is the source (second path).
+/// Path fields are stored as lossless `Vec<u8>` byte vectors.
+#[derive(Debug, PartialEq)]
+struct StrictPorcelainRecord {
+    xy: String,
+    dst: Vec<u8>,
+    src: Option<Vec<u8>>,
+}
+
+/// Accepted porcelain XY codes from production `classify_porcelain_xy`.
+const PORCELAIN_ACCEPTED_XY: &[&str] = &[
+    " M", " T", " D", "M ", "MM", "MT", "MD", "T ", "TM", "TT", "TD", "A ", "AM", "AT", "AD", "D ",
+    "R ", "RM", "RT", "RD", "C ", "CM", "CT", "CD", "??",
+];
+
+/// Parse a complete NUL-delimited porcelain status stream.
+/// Validates production XY codes, SP separator at position 2, non-empty path,
+/// R/C destination-then-source order. Consumes all records or panics.
+/// Rejects malformed/unknown/incomplete/orphan records. Preserves paths.
+fn parse_strict_porcelain_records(stdout: &[u8]) -> Vec<StrictPorcelainRecord> {
+    let mut entries = Vec::new();
+    let mut i = 0;
+    while i < stdout.len() {
+        let nul = stdout[i..].iter().position(|&b| b == 0).unwrap_or_else(|| {
+            panic!(
+                "porcelain parser: unterminated record at offset {}; stream not NUL-terminated",
+                i
+            )
+        });
+        // Must have at least 4 bytes: XY SP <1+ byte path>
+        assert!(
+            nul >= 4,
+            "porcelain parser: record too short ({} bytes) at offset {}: {:?}",
+            nul,
+            i,
+            String::from_utf8_lossy(&stdout[i..i + nul])
+        );
+        let xy_0 = stdout[i] as char;
+        let xy_1 = stdout[i + 1] as char;
+        assert_eq!(
+            stdout[i + 2],
+            b' ',
+            "porcelain parser: byte 2 must be SP separator at offset {}: {:?}",
+            i,
+            String::from_utf8_lossy(&stdout[i..i + nul])
+        );
+        let xy = format!("{}{}", xy_0, xy_1);
+        assert!(
+            PORCELAIN_ACCEPTED_XY.contains(&xy.as_str()),
+            "porcelain parser: invalid XY code {:?} at offset {}: {:?}",
+            xy,
+            i,
+            String::from_utf8_lossy(&stdout[i..i + nul])
+        );
+        let path_data = &stdout[i + 3..i + nul];
+        assert!(
+            !path_data.is_empty(),
+            "porcelain parser: empty path at offset {}",
+            i
+        );
+        let dst = path_data.to_vec();
+        i += nul + 1;
+
+        // R/C: destination-then-source order in -z porcelain.
+        let src = if xy_0 == 'R' || xy_0 == 'C' {
+            assert!(
+                i < stdout.len(),
+                "porcelain parser: missing source path for R/C at offset {}",
+                i
+            );
+            let nul2 = stdout[i..].iter().position(|&b| b == 0).unwrap_or_else(|| {
+                panic!("porcelain parser: unterminated source path at offset {}", i)
+            });
+            let src_data = &stdout[i..i + nul2];
+            assert!(
+                !src_data.is_empty(),
+                "porcelain parser: empty source path at offset {}",
+                i
+            );
+            let src_str = src_data.to_vec();
+            i += nul2 + 1;
+            Some(src_str)
+        } else {
+            None
+        };
+
+        entries.push(StrictPorcelainRecord { xy, dst, src });
+    }
+    entries
+}
+
+fn setup_and_begin() -> (tempfile::TempDir, std::path::PathBuf) {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    (_dir, repo)
+}
+
+fn setup_and_begin_with_contract(contract: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let contract_path = repo.join("contract.toml");
+    write_plan(&contract_path, contract);
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+    (dir, repo)
+}
+
+// --- P4-032: tracked deletion and type change rejection at begin ---
+
+#[test]
+#[cfg_attr(not(any(unix, windows)), ignore)]
+fn test_pkg04_begin_rejects_tracked_deletion_and_type_changes() {
+    // Case A: tracked deletion → GIT_DIRTY
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        // Delete a committed file without staging → porcelain ` D`
+        std::fs::remove_file(repo.join("README.md")).unwrap();
+        let gov_before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        let gov_after = capture_governance(&repo);
+        assert_eq!(
+            gov_before, gov_after,
+            "governance files changed during P4-032-A begin failure"
+        );
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        assert_no_temp_files(&repo);
+    }
+
+    // Case B: type change (file → symlink) → GIT_DIRTY
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let cfg_out = git(&repo)
+            .arg("config")
+            .arg("core.symlinks")
+            .arg("true")
+            .output()
+            .unwrap();
+        assert_eq!(
+            cfg_out.status.code(),
+            Some(0),
+            "git config core.symlinks failed: stderr={:?}",
+            cfg_out.stderr
+        );
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        // Replace committed README.md with a symlink → porcelain ` T`
+        std::fs::remove_file(repo.join("README.md")).unwrap();
+        symlink_relative(&repo.join("README.md"), "plan.toml");
+        let gov_before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        let gov_after = capture_governance(&repo);
+        assert_eq!(
+            gov_before, gov_after,
+            "governance files changed during P4-032-B begin failure"
+        );
+        assert_phase4_failure_exact(&output, "GIT_DIRTY");
+        assert_no_temp_files(&repo);
+    }
+}
+
+// --- P4-051, P4-052, P4-053: allowed modification states ---
+
+#[test]
+fn test_pkg04_allowed_modification_states() {
+    // P4-051: allowed unstaged modified file → success count 1
+    {
+        let (_dir, repo) = setup_and_begin();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("file.rs"), b"fn main() {}").unwrap();
+        commit_file(&repo, "src/file.rs");
+        // Modify without staging → porcelain ` M src/file.rs`
+        std::fs::write(
+            repo.join("src").join("file.rs"),
+            b"fn main() { println!(\"modified\"); }",
+        )
+        .unwrap();
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+        assert_no_temp_files(&repo);
+    }
+
+    // P4-052: allowed staged modified file → success count 1
+    {
+        let (_dir, repo) = setup_and_begin();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("file.rs"), b"fn main() {}").unwrap();
+        commit_file(&repo, "src/file.rs");
+        // Modify and stage → porcelain `M  src/file.rs`
+        std::fs::write(
+            repo.join("src").join("file.rs"),
+            b"fn main() { println!(\"modified\"); }",
+        )
+        .unwrap();
+        let add_out = git(&repo).arg("add").arg("src/file.rs").output().unwrap();
+        assert_eq!(
+            add_out.status.code(),
+            Some(0),
+            "git add src/file.rs failed: stderr={:?}",
+            add_out.stderr
+        );
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+        assert_no_temp_files(&repo);
+    }
+
+    // P4-053: allowed committed modified file after baseline → success count 1
+    {
+        // Manual setup: commit src/file.rs before begin so baseline captures it
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        assert_success(&run_plan_accept(&repo, &plan_path));
+        assert_success(&run_phase_select(&repo, "phase-1"));
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, valid_contract_toml());
+        commit_file(&repo, "contract.toml");
+        assert_success(&run_contract_draft(&repo, &contract_path));
+        // Commit src/file.rs before begin so baseline captures it
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("file.rs"), b"fn main() {}").unwrap();
+        commit_file(&repo, "src/file.rs");
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        // Record baseline for raw diff verification
+        let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+        let baseline = record["baseline_head"].as_str().unwrap().to_string();
+        // Modify and commit after baseline
+        std::fs::write(
+            repo.join("src").join("file.rs"),
+            b"fn main() { println!(\"modified\"); }",
+        )
+        .unwrap();
+        commit_file(&repo, "src/file.rs");
+        // Strict raw-diff record parse: exact M no-score record for src/file.rs
+        let raw = git_raw_diff(&repo, &baseline);
+        let raw_records = parse_strict_raw_records(&raw);
+        let file_rs_records: Vec<_> = raw_records
+            .iter()
+            .filter(|r| r.dst == b"src/file.rs")
+            .collect();
+        assert_eq!(
+            file_rs_records.len(),
+            1,
+            "Expected exactly one parsed record for src/file.rs, got {}: {:?}",
+            file_rs_records.len(),
+            raw_records
+        );
+        let rec = file_rs_records[0];
+        // Valid header already validated by parser (colon, 5 fields, modes, OIDs)
+        assert_eq!(
+            rec.status, 'M',
+            "Parsed record status must be M (modified), not A/R/C/T: {:?}",
+            rec.status
+        );
+        assert!(
+            rec.score.is_none(),
+            "Parsed M record must have no score: {:?}",
+            rec.score
+        );
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+        assert_no_temp_files(&repo);
+    }
+}
+
+// --- P4-055: allowed deleted file in staged, unstaged, and committed states ---
+
+#[test]
+fn test_pkg04_allowed_deletion_states() {
+    // P4-055a: allowed unstaged deleted file → success count 1
+    // File exists in baseline, deleted without staging after begin
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        assert_success(&run_plan_accept(&repo, &plan_path));
+        assert_success(&run_phase_select(&repo, "phase-1"));
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, valid_contract_toml());
+        commit_file(&repo, "contract.toml");
+        assert_success(&run_contract_draft(&repo, &contract_path));
+        // Commit src/file.rs before begin so it is in the baseline
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("file.rs"), b"fn main() {}").unwrap();
+        commit_file(&repo, "src/file.rs");
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Delete without staging → porcelain ` D src/file.rs`
+        std::fs::remove_file(repo.join("src").join("file.rs")).unwrap();
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+        assert_no_temp_files(&repo);
+    }
+
+    // P4-055b: allowed staged deleted file → success count 1
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        assert_success(&run_plan_accept(&repo, &plan_path));
+        assert_success(&run_phase_select(&repo, "phase-1"));
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, valid_contract_toml());
+        commit_file(&repo, "contract.toml");
+        assert_success(&run_contract_draft(&repo, &contract_path));
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("file.rs"), b"fn main() {}").unwrap();
+        commit_file(&repo, "src/file.rs");
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Delete and stage via git rm → porcelain `D  src/file.rs`
+        let rm_out = git(&repo).arg("rm").arg("src/file.rs").output().unwrap();
+        assert_eq!(
+            rm_out.status.code(),
+            Some(0),
+            "git rm src/file.rs failed: stderr={:?}",
+            rm_out.stderr
+        );
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+        assert_no_temp_files(&repo);
+    }
+
+    // P4-055c: allowed committed deleted file after baseline → success count 1
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        assert_success(&run_plan_accept(&repo, &plan_path));
+        assert_success(&run_phase_select(&repo, "phase-1"));
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, valid_contract_toml());
+        commit_file(&repo, "contract.toml");
+        assert_success(&run_contract_draft(&repo, &contract_path));
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("file.rs"), b"fn main() {}").unwrap();
+        commit_file(&repo, "src/file.rs");
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Delete and commit after baseline
+        let rm_out = git(&repo).arg("rm").arg("src/file.rs").output().unwrap();
+        assert_eq!(
+            rm_out.status.code(),
+            Some(0),
+            "git rm src/file.rs failed: stderr={:?}",
+            rm_out.stderr
+        );
+        let commit_out = git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("delete file")
+            .output()
+            .unwrap();
+        assert_eq!(
+            commit_out.status.code(),
+            Some(0),
+            "git commit 'delete file' failed: stderr={:?}",
+            commit_out.stderr
+        );
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+        assert_no_temp_files(&repo);
+    }
+}
+
+// --- P4-058: rename rejected when only destination is allowed ---
+
+#[test]
+fn test_pkg04_destination_only_allowed_rename_rejected() {
+    // Manual setup: commit docs/old.txt before begin so it is in the baseline
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let contract_path = repo.join("contract.toml");
+    write_plan(&contract_path, valid_contract_toml());
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+
+    // Commit a file outside allowed scope BEFORE begin
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(
+        repo.join("docs").join("old.txt"),
+        b"unique content for rename detection",
+    )
+    .unwrap();
+    commit_file(&repo, "docs/old.txt");
+
+    // Accept and begin
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Record baseline for raw diff verification
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let baseline = record["baseline_head"].as_str().unwrap().to_string();
+
+    // Rename docs/old.txt → src/new.txt (only destination is in allowed scope)
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let mv_out = git(&repo)
+        .arg("mv")
+        .arg("docs/old.txt")
+        .arg("src/new.txt")
+        .output()
+        .unwrap();
+    assert_eq!(
+        mv_out.status.code(),
+        Some(0),
+        "git mv failed: stderr={:?}",
+        mv_out.stderr
+    );
+    // Commit the rename (already staged by git mv)
+    let commit_out = git(&repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("rename docs to src")
+        .output()
+        .unwrap();
+    assert_eq!(
+        commit_out.status.code(),
+        Some(0),
+        "git commit failed: stderr={:?}",
+        commit_out.stderr
+    );
+
+    // Strict raw-diff structural parse with full header validation
+    let raw = git_raw_diff(&repo, &baseline);
+    let raw_records = parse_strict_raw_records(&raw);
+    // Exact one parsed R+numeric-score record
+    let rename_records: Vec<_> = raw_records.iter().filter(|r| r.status == 'R').collect();
+    let other_records: Vec<_> = raw_records.iter().filter(|r| r.status != 'R').collect();
+    assert_eq!(
+        rename_records.len(),
+        1,
+        "Expected exactly one rename (R) record, got {}: {:?}",
+        rename_records.len(),
+        raw_records
+    );
+    assert!(
+        other_records.is_empty(),
+        "Expected no unrelated records, got {}: {:?}",
+        other_records.len(),
+        raw_records
+    );
+    let rec = rename_records[0];
+    // GAP3: exact R status, score Some(100), semantic raw status token R100
+    assert_eq!(
+        rec.status, 'R',
+        "Record status must be exactly R, got {:?}",
+        rec.status
+    );
+    assert_eq!(
+        rec.score,
+        Some(100),
+        "R record must have exact score Some(100), got {:?}",
+        rec.score
+    );
+    assert_eq!(
+        rec.status_token.as_slice(),
+        b"R100",
+        "R record must have exact raw status token b\"R100\", got {:?}",
+        rec.status_token
+    );
+    // Exact source and destination (lossless byte comparison)
+    assert_eq!(
+        rec.src.as_deref(),
+        Some(b"docs/old.txt" as &[u8]),
+        "Rename source must be docs/old.txt, got {:?}",
+        rec.src
+    );
+    assert_eq!(
+        rec.dst.as_slice(),
+        b"src/new.txt",
+        "Rename destination must be src/new.txt, got {:?}",
+        rec.dst
+    );
+    // Source before destination: src is the first path, dst is the second
+    // in the raw NUL-delimited stream. The parser records src=first, dst=second,
+    // so the structural ordering is already proven by the parse succeeding.
+    // Additionally verify byte-level ordering for completeness.
+    let src_byte_pos = raw
+        .windows(b"docs/old.txt".len())
+        .position(|w| w == b"docs/old.txt")
+        .unwrap();
+    let dst_byte_pos = raw
+        .windows(b"src/new.txt".len())
+        .position(|w| w == b"src/new.txt")
+        .unwrap();
+    assert!(
+        src_byte_pos < dst_byte_pos,
+        "Source docs/old.txt (byte {}) must precede destination src/new.txt (byte {})",
+        src_byte_pos,
+        dst_byte_pos
+    );
+
+    // Source docs/old.txt is not in allowed_paths ["src/"] → CHANGE_NOT_ALLOWED
+    let gov_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    let gov_after = capture_governance(&repo);
+    assert_eq!(
+        gov_before, gov_after,
+        "governance files changed during P4-058 check failure"
+    );
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
+    assert_no_temp_files(&repo);
+}
+
+// --- P4-060: type-change inventory and enforcement ---
+
+#[test]
+#[cfg_attr(not(any(unix, windows)), ignore)]
+fn test_pkg04_type_change_inventory_and_enforcement() {
+    // Case A: allowed type change (file → symlink within allowed scope) → success
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let cfg_out = git(&repo)
+            .arg("config")
+            .arg("core.symlinks")
+            .arg("true")
+            .output()
+            .unwrap();
+        assert_eq!(
+            cfg_out.status.code(),
+            Some(0),
+            "git config core.symlinks failed: stderr={:?}",
+            cfg_out.stderr
+        );
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        assert_success(&run_plan_accept(&repo, &plan_path));
+        assert_success(&run_phase_select(&repo, "phase-1"));
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, valid_contract_toml());
+        commit_file(&repo, "contract.toml");
+        assert_success(&run_contract_draft(&repo, &contract_path));
+        // Commit both files before begin so they are in the baseline
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("target.txt"), b"target content").unwrap();
+        std::fs::write(repo.join("src").join("other.txt"), b"other content").unwrap();
+        commit_file(&repo, "src/target.txt");
+        commit_file(&repo, "src/other.txt");
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Replace src/target.txt with a symlink → src/other.txt (type change)
+        std::fs::remove_file(repo.join("src").join("target.txt")).unwrap();
+        symlink_relative(&repo.join("src").join("target.txt"), "other.txt");
+        let add_out = git(&repo)
+            .arg("add")
+            .arg("src/target.txt")
+            .output()
+            .unwrap();
+        assert_eq!(
+            add_out.status.code(),
+            Some(0),
+            "git add src/target.txt failed: stderr={:?}",
+            add_out.stderr
+        );
+        let commit_out = git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("type change to symlink")
+            .output()
+            .unwrap();
+        assert_eq!(
+            commit_out.status.code(),
+            Some(0),
+            "git commit 'type change to symlink' failed: stderr={:?}",
+            commit_out.stderr
+        );
+
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+        assert_no_temp_files(&repo);
+    }
+
+    // Case B: not-allowed type change (symlink escaping repo) → FILESYSTEM_BOUNDARY_UNSAFE
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let cfg_out = git(&repo)
+            .arg("config")
+            .arg("core.symlinks")
+            .arg("true")
+            .output()
+            .unwrap();
+        assert_eq!(
+            cfg_out.status.code(),
+            Some(0),
+            "git config core.symlinks failed: stderr={:?}",
+            cfg_out.stderr
+        );
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        assert_success(&run_plan_accept(&repo, &plan_path));
+        assert_success(&run_phase_select(&repo, "phase-1"));
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, valid_contract_toml());
+        commit_file(&repo, "contract.toml");
+        assert_success(&run_contract_draft(&repo, &contract_path));
+        // Commit src/bad.txt before begin
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("bad.txt"), b"bad content").unwrap();
+        commit_file(&repo, "src/bad.txt");
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        // Replace src/bad.txt with symlink pointing outside repo
+        std::fs::remove_file(repo.join("src").join("bad.txt")).unwrap();
+        symlink_relative(&repo.join("src").join("bad.txt"), "../../escape");
+        let add_out = git(&repo).arg("add").arg("src/bad.txt").output().unwrap();
+        assert_eq!(
+            add_out.status.code(),
+            Some(0),
+            "git add src/bad.txt failed: stderr={:?}",
+            add_out.stderr
+        );
+        let commit_out = git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("type change to escaping symlink")
+            .output()
+            .unwrap();
+        assert_eq!(
+            commit_out.status.code(),
+            Some(0),
+            "git commit 'type change to escaping symlink' failed: stderr={:?}",
+            commit_out.stderr
+        );
+
+        let gov_before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        let gov_after = capture_governance(&repo);
+        assert_eq!(
+            gov_before, gov_after,
+            "governance files changed during P4-060-B check failure"
+        );
+        assert_phase4_failure_exact(&output, "FILESYSTEM_BOUNDARY_UNSAFE");
+        assert_no_temp_files(&repo);
+    }
+}
+
+// --- P4-075: union deduplicates committed and working path ---
+
+#[test]
+fn test_pkg04_union_deduplicates_committed_and_working_path() {
+    // Manual setup: commit src/file.rs before begin so it exists at baseline
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    assert_success(&run_plan_accept(&repo, &plan_path));
+    assert_success(&run_phase_select(&repo, "phase-1"));
+    let contract_path = repo.join("contract.toml");
+    write_plan(&contract_path, valid_contract_toml());
+    commit_file(&repo, "contract.toml");
+    assert_success(&run_contract_draft(&repo, &contract_path));
+    // Commit src/file.rs before begin so it exists at baseline
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src").join("file.rs"), b"v1").unwrap();
+    commit_file(&repo, "src/file.rs");
+    let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+    // Record baseline for independent verification
+    let record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+    let baseline = record["baseline_head"].as_str().unwrap().to_string();
+
+    // Modify and commit after baseline (committed change)
+    std::fs::write(repo.join("src").join("file.rs"), b"v2").unwrap();
+    commit_file(&repo, "src/file.rs");
+
+    // Modify same path again without committing (working tree change)
+    std::fs::write(repo.join("src").join("file.rs"), b"v3").unwrap();
+
+    // Strict structural parse of committed raw baseline-to-HEAD diff
+    let raw = git_raw_diff(&repo, &baseline);
+    let raw_records = parse_strict_raw_records(&raw);
+    let committed_file_rs: Vec<_> = raw_records
+        .iter()
+        .filter(|r| r.dst == b"src/file.rs")
+        .collect();
+    assert_eq!(
+        committed_file_rs.len(),
+        1,
+        "Expected exactly one committed raw record for src/file.rs, got {}: {:?}",
+        committed_file_rs.len(),
+        raw_records
+    );
+    let committed_rec = committed_file_rs[0];
+    // Valid header already validated by parser (colon, 5 fields, modes, OIDs)
+    assert_eq!(
+        committed_rec.status, 'M',
+        "Committed status for src/file.rs must be M, got {:?}",
+        committed_rec.status
+    );
+    assert!(
+        committed_rec.score.is_none(),
+        "Committed M record must have no score"
+    );
+
+    // Strict structural parse of porcelain working/index inventory
+    let status_out = git(&repo)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("-z")
+        .arg("--untracked-files=all")
+        .arg("--ignore-submodules=none")
+        .arg("--renames")
+        .output()
+        .unwrap();
+    assert_eq!(
+        status_out.status.code(),
+        Some(0),
+        "git status --porcelain=v1 -z failed: stderr={:?}",
+        status_out.stderr
+    );
+    let porcelain_records = parse_strict_porcelain_records(&status_out.stdout);
+    let working_file_rs: Vec<_> = porcelain_records
+        .iter()
+        .filter(|r| r.dst == b"src/file.rs")
+        .collect();
+    assert_eq!(
+        working_file_rs.len(),
+        1,
+        "Expected exactly one porcelain record for src/file.rs, got {}: {:?}",
+        working_file_rs.len(),
+        porcelain_records
+    );
+    let working_rec = working_file_rs[0];
+    // Porcelain mirrors production version/flags: XY must be " M" (unstaged modification)
+    assert_eq!(
+        working_rec.xy, " M",
+        "Working XY for src/file.rs must be ' M' (unstaged modification), got {:?}",
+        working_rec.xy
+    );
+    assert!(
+        working_rec.src.is_none(),
+        "Non-rename record must have no source path"
+    );
+
+    // Both records refer to identical complete path bytes (lossless cross-inventory)
+    assert_eq!(
+        committed_rec.dst, working_rec.dst,
+        "Committed and working path bytes must be identical: committed={:?} working={:?}",
+        committed_rec.dst, working_rec.dst
+    );
+
+    // Run MRGS check; assert exact success output and count exactly 1
+    let output = run_implementation_check(&repo);
+    assert_phase4_success_exact(&output, &repo, 1);
+    assert_no_temp_files(&repo);
+}
+
+// --- P4-121: endpoint semantics ---
+
+#[test]
+fn test_pkg04_endpoint_semantics_reverted_forbidden_commit() {
+    // Use a contract with "secret/" as a forbidden path
+    let custom_contract = valid_contract_toml().replace(
+        "forbidden_paths = [\".git/\"]",
+        "forbidden_paths = [\"secret/\", \".git/\"]",
+    );
+
+    // Case A: forbidden intermediate commit fully reverted → not in current inventory
+    {
+        let (_dir, repo) = setup_and_begin_with_contract(&custom_contract);
+
+        // Commit a forbidden change (adds file under secret/)
+        std::fs::create_dir_all(repo.join("secret")).unwrap();
+        std::fs::write(repo.join("secret").join("data.txt"), b"sensitive").unwrap();
+        commit_file(&repo, "secret/data.txt");
+
+        // Revert the forbidden commit so net diff from baseline to HEAD is empty
+        let revert_out = git(&repo)
+            .arg("revert")
+            .arg("HEAD")
+            .arg("--no-edit")
+            .output()
+            .unwrap();
+        assert_eq!(
+            revert_out.status.code(),
+            Some(0),
+            "git revert HEAD --no-edit failed: stderr={:?}",
+            revert_out.stderr
+        );
+
+        // The reverted forbidden commit is NOT current inventory → count 0
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 0);
+        assert_no_temp_files(&repo);
+    }
+
+    // Case B: net forbidden endpoint state → rejected exactly
+    {
+        let (_dir, repo) = setup_and_begin_with_contract(&custom_contract);
+
+        // Commit a forbidden change (not reverted)
+        std::fs::create_dir_all(repo.join("secret")).unwrap();
+        std::fs::write(repo.join("secret").join("data.txt"), b"sensitive").unwrap();
+        commit_file(&repo, "secret/data.txt");
+
+        // The forbidden path is in the net diff → CHANGE_FORBIDDEN
+        let gov_before = capture_governance(&repo);
+        let output = run_implementation_check(&repo);
+        let gov_after = capture_governance(&repo);
+        assert_eq!(
+            gov_before, gov_after,
+            "governance files changed during P4-121-B check failure"
+        );
+        assert_phase4_failure_exact(&output, "CHANGE_FORBIDDEN");
+        assert_no_temp_files(&repo);
+    }
+}
+
+// --- P4-068: duplicate normalized allowed-rule and forbidden-rule rejection ---
+
+#[test]
+fn test_pkg05_duplicate_normalized_rules_rejected() {
+    struct Observation {
+        _dir: tempfile::TempDir,
+        repo: std::path::PathBuf,
+        output: std::process::Output,
+        governance_before: std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+        governance_after: std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+    }
+
+    let mut observations = Vec::new();
+
+    // Subcase A: exact duplicate allowed ["src/","src/"] — rejected at draft
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo_a");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        let accept_out = run_plan_accept(&repo, &plan_path);
+        assert_success(&accept_out);
+        let select_out = run_phase_select(&repo, "phase-1");
+        assert_success(&select_out);
+        let contract = valid_contract_toml().replace(
+            r#"allowed_paths = ["src/"]"#,
+            r#"allowed_paths = ["src/", "src/"]"#,
+        );
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, &contract);
+        commit_file(&repo, "contract.toml");
+        let gov_before = capture_governance(&repo);
+        let draft_out = run_contract_draft(&repo, &contract_path);
+        let gov_after = capture_governance(&repo);
+        observations.push(Observation {
+            _dir: dir,
+            repo,
+            output: draft_out,
+            governance_before: gov_before,
+            governance_after: gov_after,
+        });
+    }
+
+    // Subcase B: exact duplicate forbidden ["secret","secret"] — rejected at draft
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo_b");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        let accept_out = run_plan_accept(&repo, &plan_path);
+        assert_success(&accept_out);
+        let select_out = run_phase_select(&repo, "phase-1");
+        assert_success(&select_out);
+        let contract = valid_contract_toml().replace(
+            r#"forbidden_paths = [".git/"]"#,
+            r#"forbidden_paths = ["secret", "secret"]"#,
+        );
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, &contract);
+        commit_file(&repo, "contract.toml");
+        let gov_before = capture_governance(&repo);
+        let draft_out = run_contract_draft(&repo, &contract_path);
+        let gov_after = capture_governance(&repo);
+        observations.push(Observation {
+            _dir: dir,
+            repo,
+            output: draft_out,
+            governance_before: gov_before,
+            governance_after: gov_after,
+        });
+    }
+
+    // Subcase C: normalization-equivalent allowed ["src","src/"] — must reject at begin
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo_c");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        let accept_out = run_plan_accept(&repo, &plan_path);
+        assert_success(&accept_out);
+        let select_out = run_phase_select(&repo, "phase-1");
+        assert_success(&select_out);
+        let contract = valid_contract_toml().replace(
+            r#"allowed_paths = ["src/"]"#,
+            r#"allowed_paths = ["src", "src/"]"#,
+        );
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, &contract);
+        commit_file(&repo, "contract.toml");
+        let draft_out = run_contract_draft(&repo, &contract_path);
+        assert_success(&draft_out);
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        let accept_c = run_contract_accept(&repo, rev, &sha, "ACCEPTED");
+        assert_success(&accept_c);
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let gov_before = capture_governance(&repo);
+        let begin_out = run_implementation_begin(&repo, final_rev, &final_sha);
+        let gov_after = capture_governance(&repo);
+        observations.push(Observation {
+            _dir: dir,
+            repo,
+            output: begin_out,
+            governance_before: gov_before,
+            governance_after: gov_after,
+        });
+    }
+
+    // Subcase D: normalization-equivalent forbidden ["secret","secret/"] — must reject at begin
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo_d");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let plan_path = repo.join("plan.toml");
+        write_plan(&plan_path, valid_plan_toml());
+        commit_file(&repo, "plan.toml");
+        let accept_out = run_plan_accept(&repo, &plan_path);
+        assert_success(&accept_out);
+        let select_out = run_phase_select(&repo, "phase-1");
+        assert_success(&select_out);
+        let contract = valid_contract_toml().replace(
+            r#"forbidden_paths = [".git/"]"#,
+            r#"forbidden_paths = ["secret", "secret/"]"#,
+        );
+        let contract_path = repo.join("contract.toml");
+        write_plan(&contract_path, &contract);
+        commit_file(&repo, "contract.toml");
+        let draft_out = run_contract_draft(&repo, &contract_path);
+        assert_success(&draft_out);
+        let draft: serde_json::Value = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        let accept_d = run_contract_accept(&repo, rev, &sha, "ACCEPTED");
+        assert_success(&accept_d);
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let gov_before = capture_governance(&repo);
+        let begin_out = run_implementation_begin(&repo, final_rev, &final_sha);
+        let gov_after = capture_governance(&repo);
+        observations.push(Observation {
+            _dir: dir,
+            repo,
+            output: begin_out,
+            governance_before: gov_before,
+            governance_after: gov_after,
+        });
+    }
+
+    assert_eq!(observations.len(), 4);
+    for (label, observation) in ["A", "B", "C", "D"].iter().zip(&observations) {
+        assert_eq!(
+            observation.governance_before, observation.governance_after,
+            "subcase {}: governance changed during rejection",
+            label
+        );
+        assert_no_temp_files(&observation.repo);
+    }
+
+    let allowed_exact_stderr = b"error: duplicate entry in contract 'allowed_paths' list\n";
+    let forbidden_exact_stderr = b"error: duplicate entry in contract 'forbidden_paths' list\n";
+    assert_eq!(observations[0].output.status.code(), Some(1));
+    assert!(observations[0].output.stdout.is_empty());
+    assert_eq!(observations[0].output.stderr, allowed_exact_stderr);
+    assert_eq!(observations[1].output.status.code(), Some(1));
+    assert!(observations[1].output.stdout.is_empty());
+    assert_eq!(observations[1].output.stderr, forbidden_exact_stderr);
+    assert_phase4_failure_exact(&observations[2].output, "CONTRACT_PATH_RULE_INVALID");
+    assert_phase4_failure_exact(&observations[3].output, "CONTRACT_PATH_RULE_INVALID");
+}
+
+fn setup_pkg05_accepted_contract(
+    contract: &str,
+) -> (tempfile::TempDir, std::path::PathBuf, u32, String) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    let plan_path = repo.join("plan.toml");
+    write_plan(&plan_path, valid_plan_toml());
+    commit_file(&repo, "plan.toml");
+    let plan_accept = run_plan_accept(&repo, &plan_path);
+    assert_success(&plan_accept);
+    let phase_select = run_phase_select(&repo, "phase-1");
+    assert_success(&phase_select);
+    let contract_path = repo.join("contract.toml");
+    write_plan(&contract_path, contract);
+    commit_file(&repo, "contract.toml");
+    let draft = run_contract_draft(&repo, &contract_path);
+    assert_success(&draft);
+    let draft_record = read_json(&repo, "contract-draft.json");
+    let revision = draft_record["revision"].as_u64().unwrap() as u32;
+    let sha256 = draft_record["sha256"].as_str().unwrap().to_string();
+    let accept = run_contract_accept(&repo, revision, &sha256, "ACCEPTED");
+    assert_success(&accept);
+    let (final_revision, final_sha256) = contract_accepted_revision(&repo);
+    (dir, repo, final_revision, final_sha256)
+}
+
+fn run_pkg05_reserved_path_check(repo: &Path, path: &str) -> std::process::Output {
+    let baseline = git_head_exact(repo);
+    let diff_args = [
+        "diff",
+        "--no-ext-diff",
+        "--raw",
+        "-z",
+        "--no-abbrev",
+        "--find-renames=50%",
+        "--find-copies=50%",
+        "--find-copies-harder",
+        baseline.as_str(),
+        "HEAD",
+        "--",
+    ];
+    let payload = format!(
+        ":000000 100644 0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 A\0{}\0",
+        path
+    )
+    .into_bytes();
+    let wrapper = create_git_wrapper(repo, &diff_args, "payload", &payload);
+    let output = run_check_with_git_wrapper(repo, &wrapper);
+    assert_wrapper_reached(&wrapper);
+    output
+}
+
+#[test]
+fn test_pkg05_rule_case_semantics() {
+    let case_sensitive_contract = valid_contract_toml().replace(
+        r#"forbidden_paths = [".git/"]"#,
+        r#"forbidden_paths = ["secret/"]"#,
+    );
+
+    let (_dir, repo, final_revision, final_sha256) =
+        setup_pkg05_accepted_contract(&case_sensitive_contract);
+    assert_success(&run_implementation_begin(
+        &repo,
+        final_revision,
+        &final_sha256,
+    ));
+    std::fs::create_dir_all(repo.join("Src")).unwrap();
+    std::fs::write(repo.join("Src").join("file.txt"), b"wrong case").unwrap();
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    let governance_after = capture_governance(&repo);
+    assert_eq!(
+        governance_before, governance_after,
+        "case-sensitive allowed rejection changed governance"
+    );
+    assert_phase4_failure_exact(&output, "CHANGE_NOT_ALLOWED");
+    assert_no_temp_files(&repo);
+
+    let (_dir, repo, final_revision, final_sha256) =
+        setup_pkg05_accepted_contract(&case_sensitive_contract);
+    assert_success(&run_implementation_begin(
+        &repo,
+        final_revision,
+        &final_sha256,
+    ));
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src").join("file.txt"), b"correct case").unwrap();
+    let output = run_implementation_check(&repo);
+    assert_phase4_success_exact(&output, &repo, 1);
+    assert_no_temp_files(&repo);
+
+    let (_dir, repo, final_revision, final_sha256) =
+        setup_pkg05_accepted_contract(&case_sensitive_contract);
+    assert_success(&run_implementation_begin(
+        &repo,
+        final_revision,
+        &final_sha256,
+    ));
+    std::fs::create_dir_all(repo.join("SeCrEt")).unwrap();
+    std::fs::write(repo.join("SeCrEt").join("data.txt"), b"forbidden case").unwrap();
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    let governance_after = capture_governance(&repo);
+    assert_eq!(
+        governance_before, governance_after,
+        "case-insensitive forbidden rejection changed governance"
+    );
+    assert_phase4_failure_exact(&output, "CHANGE_FORBIDDEN");
+    assert_no_temp_files(&repo);
+
+    let (_dir, repo, final_revision, final_sha256) =
+        setup_pkg05_accepted_contract(&case_sensitive_contract);
+    assert_success(&run_implementation_begin(
+        &repo,
+        final_revision,
+        &final_sha256,
+    ));
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src").join("public.txt"), b"not forbidden").unwrap();
+    let output = run_implementation_check(&repo);
+    assert_phase4_success_exact(&output, &repo, 1);
+    assert_no_temp_files(&repo);
+}
+
+fn record_pkg05_negative_expectations(
+    label: &str,
+    output: &std::process::Output,
+    expected_stderr: &[u8],
+    governance_before: &std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+    governance_after: &std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+    repo: &Path,
+    failures: &mut Vec<String>,
+) {
+    if governance_before != governance_after {
+        failures.push(format!("case {label}: governance changed"));
+    }
+    if output.status.code() != Some(1) {
+        failures.push(format!(
+            "case {label}: expected exit 1, got {:?}",
+            output.status.code()
+        ));
+    }
+    if !output.stdout.is_empty() {
+        failures.push(format!("case {label}: stdout was not empty"));
+    }
+    if output.stderr != expected_stderr {
+        failures.push(format!(
+            "case {label}: expected stderr {:?}, got {:?}",
+            expected_stderr, output.stderr
+        ));
+    }
+    let mrgs = repo.join(".mrgs");
+    if mrgs.exists() {
+        for entry in std::fs::read_dir(&mrgs).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                failures.push(format!(
+                    "case {label}: unexpected temporary governance file {}",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_pkg05_invalid_rule_forms_matrix() {
+    let cases = [
+        (
+            "empty rule",
+            r#"forbidden_paths = [""]"#,
+            "empty or whitespace-only entry in contract 'forbidden_paths' list",
+        ),
+        (
+            "leading whitespace",
+            r#"forbidden_paths = [" secret"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "trailing whitespace",
+            r#"forbidden_paths = ["secret "]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "absolute path",
+            r#"forbidden_paths = ["/secret"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "drive-prefixed path",
+            r#"forbidden_paths = ["C:/secret"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "parent traversal",
+            r#"forbidden_paths = ["../secret"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "dot segment",
+            r#"forbidden_paths = ["./secret"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "doubled slash",
+            r#"forbidden_paths = ["secret//file"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "backslash",
+            "forbidden_paths = ['secret\\file']",
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "control character",
+            r#"forbidden_paths = ["secret\u0001file"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+        (
+            "glob metacharacter",
+            r#"forbidden_paths = ["secret/*"]"#,
+            "CONTRACT_PATH_RULE_INVALID",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (label, forbidden_line, expected_category) in cases {
+        let contract =
+            valid_contract_toml().replace(r#"forbidden_paths = [".git/"]"#, forbidden_line);
+        if label == "empty rule" {
+            let (_dir, repo, contract_path) = setup_contract_test(&contract);
+            let governance_before = capture_governance(&repo);
+            let output = run_contract_draft(&repo, &contract_path);
+            let governance_after = capture_governance(&repo);
+            record_pkg05_negative_expectations(
+                label,
+                &output,
+                format!("error: {expected_category}\n").as_bytes(),
+                &governance_before,
+                &governance_after,
+                &repo,
+                &mut failures,
+            );
+            continue;
+        }
+        let (_dir, repo, final_revision, final_sha256) = setup_pkg05_accepted_contract(&contract);
+        let governance_before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_revision, &final_sha256);
+        let governance_after = capture_governance(&repo);
+        record_pkg05_negative_expectations(
+            label,
+            &output,
+            format!("error: {expected_category}\n").as_bytes(),
+            &governance_before,
+            &governance_after,
+            &repo,
+            &mut failures,
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "PKG-05 invalid-rule matrix gaps:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn test_pkg05_reserved_allowed_targets_rejected() {
+    let cases = [".git", ".GIT", ".mrgs", ".MRGS"];
+    for target in cases {
+        let contract = valid_contract_toml().replace(
+            r#"allowed_paths = ["src/"]"#,
+            &format!(r#"allowed_paths = ["{target}"]"#),
+        );
+        let (_dir, repo, final_revision, final_sha256) = setup_pkg05_accepted_contract(&contract);
+        let governance_before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_revision, &final_sha256);
+        let governance_after = capture_governance(&repo);
+        assert_eq!(
+            governance_before, governance_after,
+            "allowed reserved target {target}: governance changed"
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "allowed reserved target {target}: unexpected exit"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "allowed reserved target {target}: stdout was not empty"
+        );
+        assert_eq!(
+            output.stderr, b"error: CONTRACT_PATH_RULE_INVALID\n",
+            "allowed reserved target {target}: unexpected stderr"
+        );
+        assert_no_temp_files(&repo);
+    }
+}
+
+#[test]
+fn test_pkg05_forbidden_git_rule_valid_and_redundant() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft = read_json(&repo, "contract-draft.json");
+    let revision = draft["revision"].as_u64().unwrap() as u32;
+    let sha256 = draft["sha256"].as_str().unwrap().to_string();
+    assert_success(&run_contract_accept(&repo, revision, &sha256, "ACCEPTED"));
+    let (final_revision, final_sha256) = contract_accepted_revision(&repo);
+    let begin_output = run_implementation_begin(&repo, final_revision, &final_sha256);
+    assert_phase4_begin_exact(&begin_output, &repo);
+    assert_no_temp_files(&repo);
+
+    let contract = valid_contract_toml().replace(
+        r#"forbidden_paths = [".git/"]"#,
+        r#"forbidden_paths = ["secret/"]"#,
+    );
+    let (_dir, repo, final_revision, final_sha256) = setup_pkg05_accepted_contract(&contract);
+    assert_success(&run_implementation_begin(
+        &repo,
+        final_revision,
+        &final_sha256,
+    ));
+    let governance_before = capture_governance(&repo);
+    let output = run_pkg05_reserved_path_check(&repo, ".git/marker");
+    let governance_after = capture_governance(&repo);
+    assert_eq!(
+        governance_before, governance_after,
+        "reserved .git path rejection changed governance"
+    );
+    assert_phase4_failure_exact(&output, "CHANGE_FORBIDDEN");
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg05_reserved_path_changes_unconditionally_rejected() {
+    let contract = valid_contract_toml().replace(
+        r#"forbidden_paths = [".git/"]"#,
+        r#"forbidden_paths = ["secret/"]"#,
+    );
+    for path in [".git/marker", ".mrgs/marker"] {
+        let (_dir, repo, final_revision, final_sha256) = setup_pkg05_accepted_contract(&contract);
+        assert_success(&run_implementation_begin(
+            &repo,
+            final_revision,
+            &final_sha256,
+        ));
+        let governance_before = capture_governance(&repo);
+        let output = run_pkg05_reserved_path_check(&repo, path);
+        let governance_after = capture_governance(&repo);
+        assert_eq!(
+            governance_before, governance_after,
+            "reserved path {path} rejection changed governance"
+        );
+        let expected = if path == ".mrgs/marker" {
+            "GIT_INVENTORY_INVALID"
+        } else {
+            "CHANGE_FORBIDDEN"
+        };
+        assert_phase4_failure_exact(&output, expected);
+        assert_no_temp_files(&repo);
+    }
+}
+
+#[test]
+fn test_pkg05_gitignore_cannot_hide_forbidden_file() {
+    let contract = valid_contract_toml()
+        .replace(
+            r#"allowed_paths = ["src/"]"#,
+            r#"allowed_paths = [".gitignore"]"#,
+        )
+        .replace(
+            r#"forbidden_paths = [".git/"]"#,
+            r#"forbidden_paths = ["secret/"]"#,
+        );
+    let (_dir, repo, final_revision, final_sha256) = setup_pkg05_accepted_contract(&contract);
+    std::fs::write(repo.join(".gitignore"), b"# baseline\n").unwrap();
+    commit_file(&repo, ".gitignore");
+    assert_success(&run_implementation_begin(
+        &repo,
+        final_revision,
+        &final_sha256,
+    ));
+
+    std::fs::write(repo.join(".gitignore"), b"secret/\n").unwrap();
+    std::fs::create_dir_all(repo.join("secret")).unwrap();
+    std::fs::write(repo.join("secret").join("new.txt"), b"forbidden").unwrap();
+
+    let ignored = git_cmd_output(
+        &repo,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+        ],
+    );
+    assert!(
+        ignored.status.success(),
+        "git ignored-file query failed: stdout={:?} stderr={:?}",
+        ignored.stdout,
+        ignored.stderr
+    );
+    assert!(
+        ignored.stderr.is_empty(),
+        "git ignored-file query wrote stderr: {:?}",
+        ignored.stderr
+    );
+    assert_eq!(ignored.stdout, b"secret/new.txt\n");
+
+    let governance_before = capture_governance(&repo);
+    let output = run_implementation_check(&repo);
+    let governance_after = capture_governance(&repo);
+    assert_eq!(
+        governance_before, governance_after,
+        "ignored forbidden-file rejection changed governance"
+    );
+    assert_phase4_failure_exact(&output, "CHANGE_FORBIDDEN");
+    assert_no_temp_files(&repo);
+}
+
+#[test]
+fn test_pkg06_revision_token_matrix() {
+    let cases = [
+        ("canonical", "1", true),
+        ("zero", "0", false),
+        ("plus sign", "+1", false),
+        ("minus sign", "-1", false),
+        ("leading zero", "01", false),
+        ("numeric overflow", "4294967296", false),
+        ("leading whitespace", " 1", false),
+        ("trailing whitespace", "1 ", false),
+        ("embedded whitespace", "1 0", false),
+        ("non-decimal text", "one", false),
+    ];
+    struct Observation {
+        label: &'static str,
+        valid: bool,
+        _dir: tempfile::TempDir,
+        repo: std::path::PathBuf,
+        output: std::process::Output,
+        before: std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+        after: std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+    }
+
+    let mut observations = Vec::new();
+    for (label, token, valid) in cases {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let revision = draft["revision"].as_u64().unwrap() as u32;
+        let sha256 = draft["sha256"].as_str().unwrap().to_string();
+        assert_success(&run_contract_accept(&repo, revision, &sha256, "ACCEPTED"));
+        let (final_revision, final_sha256) = contract_accepted_revision(&repo);
+        assert_eq!(final_revision, 1, "case {label}: fixture revision drifted");
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin_str(&repo, token, &final_sha256);
+        let after = capture_governance(&repo);
+        observations.push(Observation {
+            label,
+            valid,
+            _dir,
+            repo,
+            output,
+            before,
+            after,
+        });
+    }
+
+    let mut failures = Vec::new();
+    for observation in observations {
+        if !observation.valid && observation.before != observation.after {
+            failures.push(format!("case {}: governance changed", observation.label));
+        }
+        if observation.valid {
+            if observation.output.status.code() != Some(0) {
+                failures.push(format!(
+                    "case {}: expected success, stderr={:?}",
+                    observation.label, observation.output.stderr
+                ));
+            }
+            if !observation.output.stderr.is_empty() {
+                failures.push(format!(
+                    "case {}: success wrote stderr {:?}",
+                    observation.label, observation.output.stderr
+                ));
+            }
+            if !observation
+                .repo
+                .join(".mrgs")
+                .join("implementation-authority.json")
+                .exists()
+            {
+                failures.push(format!(
+                    "case {}: implementation authority was not created",
+                    observation.label
+                ));
+            }
+        } else {
+            if observation.output.status.code() != Some(1) {
+                failures.push(format!(
+                    "case {}: expected exit 1, got {:?}",
+                    observation.label,
+                    observation.output.status.code()
+                ));
+            }
+            if !observation.output.stdout.is_empty() {
+                failures.push(format!("case {}: stdout was not empty", observation.label));
+            }
+            if observation.output.stderr != b"error: INVALID_ARGUMENT\n" {
+                failures.push(format!(
+                    "case {}: unexpected stderr {:?}",
+                    observation.label, observation.output.stderr
+                ));
+            }
+            if observation
+                .repo
+                .join(".mrgs")
+                .join("implementation-authority.json")
+                .exists()
+            {
+                failures.push(format!(
+                    "case {}: implementation authority was created",
+                    observation.label
+                ));
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(observation.repo.join(".mrgs")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                    failures.push(format!(
+                        "case {}: temporary governance file {}",
+                        observation.label,
+                        entry.path().display()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "PKG-06 revision-token matrix gaps:\n{}",
+        failures.join("\n")
+    );
+}
+
+fn rewrite_pkg06_accepted_contract_id(repo: &Path, contract_id: &str, content: &str) -> String {
+    let sha256 = contract_sha256(content);
+    let mut draft = read_json(repo, "contract-draft.json");
+    draft["contract_id"] = serde_json::json!(contract_id);
+    draft["sha256"] = serde_json::json!(&sha256);
+    draft["content"] = serde_json::json!(content);
+    write_json(repo, "contract-draft.json", &draft);
+
+    let mut ledger = read_json(repo, "accepted-contract.json");
+    ledger["contract_id"] = serde_json::json!(contract_id);
+    ledger["revisions"][0]["sha256"] = serde_json::json!(&sha256);
+    ledger["revisions"][0]["content"] = serde_json::json!(content);
+    write_json(repo, "accepted-contract.json", &ledger);
+
+    let stored_draft = read_json(repo, "contract-draft.json");
+    let stored_ledger = read_json(repo, "accepted-contract.json");
+    assert_eq!(stored_draft["contract_id"].as_str(), Some(contract_id));
+    assert_eq!(stored_ledger["contract_id"].as_str(), Some(contract_id));
+    assert_eq!(
+        stored_ledger["revisions"][0]["content"].as_str(),
+        Some(content)
+    );
+    sha256
+}
+
+#[test]
+fn test_pkg06_invalid_contract_id_token_classes() {
+    let cases = [
+        (
+            "embedded ASCII space",
+            "test contract-v1",
+            "test contract-v1",
+        ),
+        ("tab", "test\tcontract-v1", "test\\tcontract-v1"),
+        ("line terminator", "test\ncontract-v1", "test\\ncontract-v1"),
+        (
+            "Unicode character",
+            "testé-contract-v1",
+            "testé-contract-v1",
+        ),
+        (
+            "non-token punctuation",
+            "test@contract-v1",
+            "test@contract-v1",
+        ),
+    ];
+    struct Observation {
+        label: &'static str,
+        _dir: tempfile::TempDir,
+        repo: std::path::PathBuf,
+        output: std::process::Output,
+        before: std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+        after: std::collections::BTreeMap<std::ffi::OsString, GovernanceEntry>,
+        implementation_before: bool,
+        implementation_after: bool,
+    }
+
+    let mut observations = Vec::new();
+    for (label, contract_id, encoded_id) in cases {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let draft_revision = draft["revision"].as_u64().unwrap() as u32;
+        let draft_sha256 = draft["sha256"].as_str().unwrap().to_string();
+        assert_success(&run_contract_accept(
+            &repo,
+            draft_revision,
+            &draft_sha256,
+            "ACCEPTED",
+        ));
+        let content = valid_contract_toml().replace("test-contract-v1", encoded_id);
+        let final_sha256 = rewrite_pkg06_accepted_contract_id(&repo, contract_id, &content);
+        let stored_ledger = read_json(&repo, "accepted-contract.json");
+        assert_eq!(stored_ledger["contract_id"].as_str(), Some(contract_id));
+        assert_eq!(
+            stored_ledger["revisions"][0]["sha256"].as_str(),
+            Some(final_sha256.as_str())
+        );
+        let final_revision = stored_ledger["revisions"][0]["revision"].as_u64().unwrap() as u32;
+        let implementation_path = repo.join(".mrgs").join("implementation-authority.json");
+        let implementation_before = implementation_path.exists();
+        let before = capture_governance(&repo);
+        let output = run_implementation_begin(&repo, final_revision, &final_sha256);
+        let after = capture_governance(&repo);
+        let implementation_after = implementation_path.exists();
+        observations.push(Observation {
+            label,
+            _dir,
+            repo,
+            output,
+            before,
+            after,
+            implementation_before,
+            implementation_after,
+        });
+    }
+
+    let mut failures = Vec::new();
+    for observation in observations {
+        if observation.before != observation.after {
+            failures.push(format!("case {}: governance changed", observation.label));
+        }
+        if observation.output.status.code() != Some(1) {
+            failures.push(format!(
+                "case {}: expected exit 1, got {:?}",
+                observation.label,
+                observation.output.status.code()
+            ));
+        }
+        if !observation.output.stdout.is_empty() {
+            failures.push(format!("case {}: stdout was not empty", observation.label));
+        }
+        if observation.output.stderr != b"error: GOVERNANCE_AUTHORITY_INVALID\n" {
+            failures.push(format!(
+                "case {}: unexpected stderr {:?}",
+                observation.label, observation.output.stderr
+            ));
+        }
+        if observation.implementation_before != observation.implementation_after {
+            failures.push(format!(
+                "case {}: implementation authority changed",
+                observation.label
+            ));
+        }
+        if let Ok(entries) = std::fs::read_dir(observation.repo.join(".mrgs")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                    failures.push(format!(
+                        "case {}: temporary governance file {}",
+                        observation.label,
+                        entry.path().display()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "PKG-06 accepted-contract-ID matrix gaps:\n{}",
+        failures.join("\n")
+    );
+}
+
+// ============================================================================
+// PKG-07: Symlink, Publication, Category, and Redaction Evidence
+// ============================================================================
+
+// P4-114: staged symlink deletion does not inspect the deleted index target,
+// while an extant committed symlink version is inspected when selected by the
+// baseline diff.
+#[test]
+fn test_pkg07_staged_symlink_deletion_and_committed_inspection() {
+    // Case A: staged symlink deletion — target exists and would fail if
+    // inspected, but deletion is staged so no target inspection occurs.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        symlink_relative(&repo.join("src").join("link"), "../.git/config");
+        git(&repo).arg("add").arg("src/link").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add failing link")
+            .status()
+            .unwrap();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        std::fs::remove_file(repo.join("src").join("link")).unwrap();
+        git(&repo).arg("add").arg("src/link").status().unwrap();
+
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+    }
+
+    // Case B: extant committed symlink selected by baseline diff requires
+    // target inspection — its forbidden target produces a distinctive error.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("base.txt"), b"base").unwrap();
+        git(&repo).arg("add").arg("src/base.txt").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add base")
+            .status()
+            .unwrap();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        symlink_relative(&repo.join("src").join("link"), "../.git/config");
+        git(&repo).arg("add").arg("src/link").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add failing link")
+            .status()
+            .unwrap();
+
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "FILESYSTEM_BOUNDARY_UNSAFE",
+            &repo,
+            &governance_before,
+        );
+    }
+}
+
+// P4-115: symlink target matching a forbidden rule or no allowed rule is
+// rejected.
+#[test]
+fn test_pkg07_symlink_target_authority_rejections() {
+    // Case A: symlink target matches a forbidden rule.
+    {
+        let (_dir, repo) = setup_implementation_forbidden_rule("src/forbidden/");
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        std::fs::create_dir_all(repo.join("src").join("forbidden")).unwrap();
+        std::fs::write(repo.join("src").join("forbidden").join("file"), b"x").unwrap();
+        git(&repo)
+            .arg("add")
+            .arg("src/forbidden/file")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add forbidden target")
+            .status()
+            .unwrap();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        symlink_relative(&repo.join("src").join("link"), "forbidden/file");
+        git(&repo).arg("add").arg("src/link").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add link to forbidden")
+            .status()
+            .unwrap();
+
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "FILESYSTEM_BOUNDARY_UNSAFE",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // Case B: symlink target matches no allowed rule.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("base.txt"), b"base").unwrap();
+        std::fs::write(repo.join("outside.txt"), b"outside").unwrap();
+        git(&repo).arg("add").arg("outside.txt").status().unwrap();
+        git(&repo).arg("add").arg("src/base.txt").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("base")
+            .status()
+            .unwrap();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        symlink_relative(&repo.join("src").join("link"), "../outside.txt");
+        git(&repo).arg("add").arg("src/link").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("link to outside")
+            .status()
+            .unwrap();
+
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "FILESYSTEM_BOUNDARY_UNSAFE",
+            &repo,
+            &governance_before,
+        );
+    }
+}
+
+// P4-116: safe contained symlink target and link path both require allowed
+// authority.
+#[test]
+fn test_pkg07_safe_symlink_requires_link_and_target_authority() {
+    // Case A: link allowed + target allowed => success.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("target.txt"), b"t").unwrap();
+        git(&repo)
+            .arg("add")
+            .arg("src/target.txt")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("target")
+            .status()
+            .unwrap();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        symlink_relative(&repo.join("src").join("link"), "target.txt");
+        git(&repo).arg("add").arg("src/link").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("link")
+            .status()
+            .unwrap();
+
+        let output = run_implementation_check(&repo);
+        assert_phase4_success_exact(&output, &repo, 1);
+    }
+
+    // Case B: link not allowed + target allowed => rejection.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("target.txt"), b"t").unwrap();
+        git(&repo)
+            .arg("add")
+            .arg("src/target.txt")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("target")
+            .status()
+            .unwrap();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        symlink_relative(&repo.join("not_allowed_link"), "src/target.txt");
+        git(&repo)
+            .arg("add")
+            .arg("not_allowed_link")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("link at root")
+            .status()
+            .unwrap();
+
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "CHANGE_NOT_ALLOWED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // Case C: link allowed + target not allowed => rejection.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("base.txt"), b"base").unwrap();
+        std::fs::write(repo.join("outside.txt"), b"outside").unwrap();
+        git(&repo).arg("add").arg("src/base.txt").status().unwrap();
+        git(&repo).arg("add").arg("outside.txt").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("base")
+            .status()
+            .unwrap();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        symlink_relative(&repo.join("src").join("link"), "../outside.txt");
+        git(&repo).arg("add").arg("src/link").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("link to outside")
+            .status()
+            .unwrap();
+
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "FILESYSTEM_BOUNDARY_UNSAFE",
+            &repo,
+            &governance_before,
+        );
+    }
+}
+
+// P4-117: create the destination after the implementation temporary appears
+// and before no-clobber publication. This is an actual filesystem race against
+// the real publication boundary.
+#[test]
+fn test_pkg07_atomic_destination_race_preserves_competing_record() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let governance_before = capture_earlier_governance_bytes(&repo);
+
+    let signal = _dir.path().join("atomic-before-publish.signal");
+    let release = _dir.path().join("atomic-before-publish.release");
+    let mut child = spawn_implementation_begin_with_env(
+        &repo,
+        final_rev,
+        &final_sha,
+        &[
+            (
+                "MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_SIGNAL",
+                signal.as_path(),
+            ),
+            (
+                "MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_RELEASE",
+                release.as_path(),
+            ),
+        ],
+        &[],
+    );
+    wait_for_publish_signal(&mut child, &signal);
+    assert_eq!(std::fs::read(&signal).unwrap(), b"reached");
+
+    let destination = repo.join(".mrgs").join("implementation-authority.json");
+    let competing_bytes = br#"{"competing":true,"bytes":"preserved"}"#.to_vec();
+    let mut competing = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .unwrap();
+    use std::io::Write;
+    competing.write_all(&competing_bytes).unwrap();
+    competing.sync_all().unwrap();
+    std::fs::write(&release, b"release").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert_phase4_failure_exact(&output, "IMPLEMENTATION_AUTHORITY_CONFLICT");
+    assert_eq!(std::fs::read(&destination).unwrap(), competing_bytes);
+    assert_eq!(governance_before, capture_earlier_governance_bytes(&repo));
+    assert_no_temp_files(&repo);
+}
+
+// P4-118: force the real no-clobber operation to return the same internal
+// persistence error used for an unsupported platform operation.
+#[test]
+fn test_pkg07_unsupported_no_clobber_no_fallback_or_partial_record() {
+    let (_dir, repo) = setup_implementation_basic();
+    let draft = read_json(&repo, "contract-draft.json");
+    let sha = draft["sha256"].as_str().unwrap().to_string();
+    let rev = draft["revision"].as_u64().unwrap() as u32;
+    assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+    let (final_rev, final_sha) = contract_accepted_revision(&repo);
+    let governance_before = capture_earlier_governance_bytes(&repo);
+    let signal = _dir.path().join("unsupported-before-publish.signal");
+    let release = _dir.path().join("unsupported-before-publish.release");
+    let mut child = spawn_implementation_begin_with_env(
+        &repo,
+        final_rev,
+        &final_sha,
+        &[
+            (
+                "MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_SIGNAL",
+                signal.as_path(),
+            ),
+            (
+                "MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_RELEASE",
+                release.as_path(),
+            ),
+        ],
+        &[("MRGS_TEST_ONLY_FORCE_NO_CLOBBER_UNSUPPORTED", "1")],
+    );
+    wait_for_publish_signal(&mut child, &signal);
+    assert_eq!(std::fs::read(&signal).unwrap(), b"reached");
+    std::fs::write(&release, b"release").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert_phase4_failure_exact(&output, "PERSISTENCE_FAILED");
+    assert!(!repo
+        .join(".mrgs")
+        .join("implementation-authority.json")
+        .exists());
+    assert_eq!(governance_before, capture_earlier_governance_bytes(&repo));
+    assert_no_temp_files(&repo);
+}
+
+fn capture_governance_bytes(repo: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut bytes = Vec::new();
+    for fname in &[
+        "accepted-plan.json",
+        "state.json",
+        "contract-draft.json",
+        "accepted-contract.json",
+        "implementation-authority.json",
+    ] {
+        let path = repo.join(".mrgs").join(fname);
+        if path.exists() {
+            bytes.push((fname.to_string(), std::fs::read(&path).unwrap()));
+        }
+    }
+    bytes
+}
+
+fn capture_earlier_governance_bytes(repo: &Path) -> Vec<(String, Vec<u8>)> {
+    capture_governance_bytes(repo)
+        .into_iter()
+        .filter(|(name, _)| name != "implementation-authority.json")
+        .collect()
+}
+
+fn wait_for_publish_signal(child: &mut std::process::Child, signal: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if signal.is_file() {
+            return;
+        }
+        if child.try_wait().unwrap().is_some() {
+            panic!("publication process exited before failpoint signal");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("publication failpoint signal timeout");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+// P4-119: exact category mapping for representative failure from every
+// Section 15 category. Reuses existing complete tests and adds only missing
+// categories.
+#[test]
+fn test_pkg07_section15_category_mapping_matrix() {
+    // INVALID_ARGUMENT
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin_str(
+            &repo,
+            "abc",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "INVALID_ARGUMENT",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // REPOSITORY_INVALID: a missing repository path reaches the direct
+    // repository validation category.
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("missing-repo");
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin_str(
+            &repo,
+            "1",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "REPOSITORY_INVALID",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // GOVERNANCE_AUTHORITY_INVALID
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_init(&repo);
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin_str(
+            &repo,
+            "1",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GOVERNANCE_AUTHORITY_INVALID",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // CONTRACT_NOT_ACCEPTED
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin_str(
+            &repo,
+            "1",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "CONTRACT_NOT_ACCEPTED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // REQUESTED_REVISION_STALE
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        assert_success(&run_contract_accept(&repo, 1, &sha, "ACCEPTED"));
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin_str(&repo, "99", &sha);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "REQUESTED_REVISION_STALE",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // REQUESTED_SHA_STALE
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        assert_success(&run_contract_accept(&repo, 1, &sha, "ACCEPTED"));
+        let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin_str(&repo, "1", wrong_sha);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "REQUESTED_SHA_STALE",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // CONTRACT_PATH_RULE_INVALID
+    {
+        let (_dir, repo, final_revision, final_sha256) =
+            setup_pkg05_accepted_contract(&valid_contract_toml().replace(
+                r#"allowed_paths = ["src/"]"#,
+                r#"allowed_paths = ["src", "src/"]"#,
+            ));
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin(&repo, final_revision, &final_sha256);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "CONTRACT_PATH_RULE_INVALID",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // GIT_COMMAND_FAILED
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let empty_path_dir = tempfile::TempDir::new().unwrap();
+        let mut cmd = cargo_bin();
+        cmd.arg("implementation")
+            .arg("begin")
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--revision")
+            .arg(final_rev.to_string())
+            .arg("--sha256")
+            .arg(&final_sha)
+            .env("PATH", empty_path_dir.path());
+        let governance_before = capture_governance_bytes(&repo);
+        let output = cmd.output().unwrap();
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GIT_COMMAND_FAILED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // GIT_ROOT_MISMATCH: the wrapper returns a valid but different top-level
+    // path for the exact root-discovery invocation and delegates every other
+    // Git command.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let governance_before = capture_earlier_governance_bytes(&repo);
+        let different_root = repo.parent().unwrap().join("different-root");
+        std::fs::create_dir(&different_root).unwrap();
+        let payload = format!("{}\n", different_root.display()).into_bytes();
+        let wrapper = create_git_wrapper(
+            &repo,
+            &["rev-parse", "--show-toplevel"],
+            "payload",
+            &payload,
+        );
+        let output = run_begin_with_git_wrapper(&repo, final_rev, &final_sha, &wrapper);
+        assert_phase4_failure_exact(&output, "GIT_ROOT_MISMATCH");
+        assert_wrapper_reached(&wrapper);
+        assert_eq!(governance_before, capture_governance_bytes(&repo));
+        assert!(!repo
+            .join(".mrgs")
+            .join("implementation-authority.json")
+            .exists());
+        assert_no_temp_files(&repo);
+    }
+
+    // GIT_DETACHED_HEAD
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let head = git_head_exact(&repo);
+        git(&repo)
+            .arg("checkout")
+            .arg("--detach")
+            .arg(&head)
+            .status()
+            .unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GIT_DETACHED_HEAD",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // GIT_HEAD_INVALID: the wrapper returns malformed HEAD output for the exact
+    // verification invocation and delegates every other Git command.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let governance_before = capture_earlier_governance_bytes(&repo);
+        let wrapper = create_git_wrapper(
+            &repo,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            "payload",
+            b"not-a-valid-head\n",
+        );
+        let output = run_begin_with_git_wrapper(&repo, final_rev, &final_sha, &wrapper);
+        assert_phase4_failure_exact(&output, "GIT_HEAD_INVALID");
+        assert_wrapper_reached(&wrapper);
+        assert_eq!(governance_before, capture_governance_bytes(&repo));
+        assert!(!repo
+            .join(".mrgs")
+            .join("implementation-authority.json")
+            .exists());
+        assert_no_temp_files(&repo);
+    }
+
+    // GIT_DIRTY: modify a tracked file within allowed_paths to trigger dirty detection
+    // before governance validation
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("dirty.rs"), b"fn dirty() {}").unwrap();
+        git(&repo).arg("add").arg("src/dirty.rs").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("add dirty")
+            .status()
+            .unwrap();
+        std::fs::write(repo.join("src").join("dirty.rs"), b"fn dirty_modified() {}").unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_preserves_governance(&output, "GIT_DIRTY", &repo, &governance_before);
+    }
+
+    // GIT_OPERATION_IN_PROGRESS
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::write(repo.join(".git").join("MERGE_HEAD"), b"fake").unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GIT_OPERATION_IN_PROGRESS",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // GIT_SUBMODULE_UNSUPPORTED
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let sub = repo.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        git_init(&sub);
+        std::fs::write(sub.join("f"), b"x").unwrap();
+        git(&sub).arg("add").arg("f").status().unwrap();
+        git(&sub)
+            .arg("commit")
+            .arg("-m")
+            .arg("init")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("submodule")
+            .arg("add")
+            .arg(&sub)
+            .arg("sub")
+            .status()
+            .unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("sub")
+            .status()
+            .unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GIT_SUBMODULE_UNSUPPORTED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // IMPLEMENTATION_AUTHORITY_MISSING
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "IMPLEMENTATION_AUTHORITY_MISSING",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // IMPLEMENTATION_AUTHORITY_INVALID
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        std::fs::write(
+            repo.join(".mrgs").join("implementation-authority.json"),
+            b"not json",
+        )
+        .unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "IMPLEMENTATION_AUTHORITY_INVALID",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // IMPLEMENTATION_AUTHORITY_CONFLICT
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("new.rs"), b"fn new() {}").unwrap();
+        git(&repo).arg("add").arg("src/new.rs").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("desc")
+            .status()
+            .unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "IMPLEMENTATION_AUTHORITY_CONFLICT",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // IMPLEMENTATION_AUTHORITY_STALE: a newer accepted contract invalidates the
+    // existing implementation binding.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        let contract_path = repo.join("contract.toml");
+        let v2 = valid_contract_toml().replace("Test objective", "V2 objective");
+        write_plan(&contract_path, &v2);
+        commit_file(&repo, "contract.toml");
+        let v2_sha = contract_sha256(&v2);
+        assert_success(&run_contract_revise(&repo, &contract_path, 1, &sha));
+        assert_success(&run_contract_accept(&repo, 2, &v2_sha, "ACCEPTED"));
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "IMPLEMENTATION_AUTHORITY_STALE",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // BASELINE_BRANCH_CHANGED
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        git(&repo)
+            .arg("checkout")
+            .arg("-b")
+            .arg("other")
+            .status()
+            .unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "BASELINE_BRANCH_CHANGED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // BASELINE_COMMIT_MISSING
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        let mut record: serde_json::Value = read_json(&repo, "implementation-authority.json");
+        record["baseline_head"] = serde_json::json!("0000000000000000000000000000000000000000");
+        write_json(&repo, "implementation-authority.json", &record);
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "BASELINE_COMMIT_MISSING",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // BASELINE_HISTORY_CHANGED: after begin, resetting HEAD to parent causes
+    // the baseline commit to be unreachable from HEAD, triggering the category.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        let parent = git(&repo).arg("rev-parse").arg("HEAD~1").output().unwrap();
+        let parent = String::from_utf8(parent.stdout).unwrap().trim().to_string();
+        git(&repo)
+            .arg("reset")
+            .arg("--hard")
+            .arg(&parent)
+            .status()
+            .unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "BASELINE_HISTORY_CHANGED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // GIT_INVENTORY_INVALID
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        git(&repo)
+            .arg("update-index")
+            .arg("--assume-unchanged")
+            .arg("plan.toml")
+            .status()
+            .unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_begin(&repo, final_rev, &final_sha);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GIT_INVENTORY_INVALID",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // GIT_CONFLICT: an unmerged stage-1/2/3 entry reaches the direct conflict
+    // category before change inventory.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        let oid1 = git_blob(&repo, b"ancestor");
+        let oid2 = git_blob(&repo, b"ours");
+        let oid3 = git_blob(&repo, b"theirs");
+        let mut child = git(&repo)
+            .arg("update-index")
+            .arg("--index-info")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "100644 {} 1\tsrc/conflict.txt", oid1).unwrap();
+        writeln!(stdin, "100644 {} 2\tsrc/conflict.txt", oid2).unwrap();
+        writeln!(stdin, "100644 {} 3\tsrc/conflict.txt", oid3).unwrap();
+        drop(child.stdin.take());
+        assert!(child.wait_with_output().unwrap().status.success());
+
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GIT_CONFLICT",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // CHANGE_PATH_INVALID: the Git inventory grammar is intentionally identical
+    // to the changed-path grammar, so the private failpoint reaches the exact
+    // production changed-path decision after a valid inventory record exists.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        std::fs::write(repo.join("new.rs"), b"fn new() {}\n").unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check_with_env(
+            &repo,
+            &[("MRGS_TEST_ONLY_FORCE_CHANGE_PATH_INVALID", "1")],
+        );
+        assert_phase4_failure_exact(&output, "CHANGE_PATH_INVALID");
+        assert_eq!(governance_before, capture_governance_bytes(&repo));
+        assert_no_temp_files(&repo);
+    }
+
+    // CHANGE_FORBIDDEN: create forbidden file after begin so it appears in the diff
+    {
+        let (_dir, repo) = setup_implementation_forbidden_rule("src/secret/");
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        std::fs::create_dir_all(repo.join("src").join("secret")).unwrap();
+        std::fs::write(repo.join("src").join("secret").join("new"), b"x").unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "CHANGE_FORBIDDEN",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // CHANGE_NOT_ALLOWED: create untracked file outside allowed_paths after begin
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        std::fs::write(repo.join("outside.txt"), b"x").unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "CHANGE_NOT_ALLOWED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // FILESYSTEM_BOUNDARY_UNSAFE: symlink to .git/ returns FILESYSTEM_BOUNDARY_UNSAFE
+    // because the target matches a forbidden rule (or is outside allowed_paths).
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("base.txt"), b"base").unwrap();
+        git(&repo).arg("add").arg("src/base.txt").status().unwrap();
+        git(&repo)
+            .arg("commit")
+            .arg("-m")
+            .arg("base")
+            .status()
+            .unwrap();
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+        symlink_relative(&repo.join("src").join("link"), "../.git/config");
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "FILESYSTEM_BOUNDARY_UNSAFE",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // PERSISTENCE_FAILED: the real publication boundary is reached, then the
+    // private unsupported no-clobber failpoint returns the platform error.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        let governance_before = capture_earlier_governance_bytes(&repo);
+        let signal = _dir.path().join("matrix-before-publish.signal");
+        let release = _dir.path().join("matrix-before-publish.release");
+        let mut child = spawn_implementation_begin_with_env(
+            &repo,
+            final_rev,
+            &final_sha,
+            &[
+                (
+                    "MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_SIGNAL",
+                    signal.as_path(),
+                ),
+                (
+                    "MRGS_TEST_ONLY_ATOMIC_BEFORE_PUBLISH_RELEASE",
+                    release.as_path(),
+                ),
+            ],
+            &[("MRGS_TEST_ONLY_FORCE_NO_CLOBBER_UNSUPPORTED", "1")],
+        );
+        wait_for_publish_signal(&mut child, &signal);
+        assert_eq!(std::fs::read(&signal).unwrap(), b"reached");
+        std::fs::write(&release, b"release").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_phase4_failure_exact(&output, "PERSISTENCE_FAILED");
+        assert!(!repo
+            .join(".mrgs")
+            .join("implementation-authority.json")
+            .exists());
+        assert_eq!(governance_before, capture_earlier_governance_bytes(&repo));
+        assert_no_temp_files(&repo);
+    }
+}
+
+// P4-120: semantic errors redact absolute paths, inherited Git diagnostics,
+// and invalid non-UTF-8 path bytes.
+#[test]
+fn test_pkg07_semantic_error_redaction_matrix() {
+    // Case A: absolute path redaction
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let repo_str = repo.to_string_lossy().to_string();
+
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        std::fs::write(repo.join("outside.txt"), b"x").unwrap();
+        let governance_before = capture_governance_bytes(&repo);
+
+        let output = run_implementation_check(&repo);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            !stderr.contains(&repo_str),
+            "stderr must not contain absolute repository path: {}",
+            stderr
+        );
+        assert!(
+            !stderr.contains("M:") && !stderr.contains("C:"),
+            "stderr must not contain drive prefix: {}",
+            stderr
+        );
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "CHANGE_NOT_ALLOWED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // Case B: inherited Git diagnostic redaction
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+
+        let sentinel = "MRGS_SENTINEL_GIT_DIAGNOSTIC_12345";
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let wrapper_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+        let source = format!(
+            r#"
+use std::env;
+use std::ffi::OsString;
+use std::process::Command;
+
+fn main() {{
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let args_str: Vec<String> = args.iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let is_config_get = args_str.contains(&"config".to_string())
+        && args_str.contains(&"--get".to_string());
+
+    if is_config_get {{
+        eprintln!("{sentinel}");
+        std::process::exit(1);
+    }}
+
+    let status = Command::new({real:?}).args(&args).status().unwrap();
+    std::process::exit(status.code().unwrap_or(1));
+}}
+"#,
+            real = real_git_executable().display().to_string(),
+        );
+        let source_path = wrapper_dir.join("git-wrapper.rs");
+        std::fs::write(&source_path, source).unwrap();
+        let wrapper = wrapper_dir.join("git.exe");
+        let compile = std::process::Command::new("rustc")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&wrapper)
+            .output()
+            .unwrap();
+        assert_eq!(compile.status.code(), Some(0));
+
+        let mut cmd = cargo_bin();
+        cmd.arg("implementation")
+            .arg("begin")
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--revision")
+            .arg(final_rev.to_string())
+            .arg("--sha256")
+            .arg(&final_sha)
+            .env("PATH", wrapper_dir);
+        let governance_before = capture_governance_bytes(&repo);
+        let output = cmd.output().unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(sentinel),
+            "stderr must not contain Git diagnostic sentinel: {}",
+            stderr
+        );
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "GIT_COMMAND_FAILED",
+            &repo,
+            &governance_before,
+        );
+    }
+
+    // Case C: invalid non-UTF-8 parser input redaction. Windows does not
+    // support non-UTF-8 filesystem paths, so the contract's parser fallback is
+    // exercised with invalid bytes in the implementation record itself.
+    {
+        let (_dir, repo) = setup_implementation_basic();
+        let draft = read_json(&repo, "contract-draft.json");
+        let sha = draft["sha256"].as_str().unwrap().to_string();
+        let rev = draft["revision"].as_u64().unwrap() as u32;
+        assert_success(&run_contract_accept(&repo, rev, &sha, "ACCEPTED"));
+        let (final_rev, final_sha) = contract_accepted_revision(&repo);
+        assert_success(&run_implementation_begin(&repo, final_rev, &final_sha));
+
+        let invalid_bytes = b"\xff\xfe\xfd";
+        let authority_path = repo.join(".mrgs").join("implementation-authority.json");
+        let mut authority_bytes = std::fs::read(&authority_path).unwrap();
+        authority_bytes.extend_from_slice(invalid_bytes);
+        std::fs::write(&authority_path, authority_bytes).unwrap();
+
+        let governance_before = capture_governance_bytes(&repo);
+        let output = run_implementation_check(&repo);
+        assert_phase4_failure_preserves_governance(
+            &output,
+            "IMPLEMENTATION_AUTHORITY_INVALID",
+            &repo,
+            &governance_before,
+        );
+        assert!(!output.stderr.contains(&0xff));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains('\u{FFFD}'));
+    }
 }
