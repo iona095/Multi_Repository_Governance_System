@@ -1,5 +1,6 @@
 mod audit;
 mod cli;
+mod closeout;
 mod contract;
 mod error;
 mod git;
@@ -22,6 +23,9 @@ fn main() {
         },
         cli::CliCommand::Phase(sub) => match sub.action {
             cli::PhaseAction::Select { repo, phase } => (cmd_phase_select(&repo, &phase), false),
+            cli::PhaseAction::Close { repo, phase } => {
+                (closeout::cmd_phase_close(&repo, &phase), true)
+            }
         },
         cli::CliCommand::Contract(sub) => match sub.action {
             cli::ContractAction::Draft { repo, contract } => {

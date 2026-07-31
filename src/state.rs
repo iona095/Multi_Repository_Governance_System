@@ -114,7 +114,7 @@ pub struct ImplementationAuthority {
     pub baseline_branch: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceState {
     pub schema_version: u32,
     pub accepted_plan_sha256: String,
@@ -151,7 +151,7 @@ fn unique_temp_name(filename: &str) -> String {
 }
 
 #[cfg(windows)]
-fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
@@ -190,7 +190,7 @@ fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::rename(src, dst)
 }
 
@@ -201,7 +201,8 @@ fn validate_governance_filename(filename: &str) -> Result<(), crate::error::Erro
         | "contract-draft.json"
         | "accepted-contract.json"
         | "implementation-authority.json"
-        | "audit-ledger.json" => {}
+        | "audit-ledger.json"
+        | "completion-ledger.json" => {}
         _ => {
             return Err(crate::error::Error::UnauthorizedFilename(
                 filename.to_string(),

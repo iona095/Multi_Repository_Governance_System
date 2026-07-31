@@ -1272,6 +1272,7 @@ fn is_exempt_governance_path(
         ".mrgs/accepted-contract.json",
         ".mrgs/implementation-authority.json",
         ".mrgs/audit-ledger.json",
+        ".mrgs/completion-ledger.json",
     ];
     // Only exempt one of the exact fixed paths AND only when Section 6.4
     // proved that no tracked index entry exists for it (contract §6.5).
@@ -3432,6 +3433,8 @@ mod p2a_tests {
             ".mrgs/contract-draft.json",
             ".mrgs/accepted-contract.json",
             ".mrgs/implementation-authority.json",
+            ".mrgs/audit-ledger.json",
+            ".mrgs/completion-ledger.json",
         ] {
             assert!(is_exempt_governance_path(p, &auth, &none));
         }

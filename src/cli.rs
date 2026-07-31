@@ -47,6 +47,12 @@ pub enum PhaseAction {
         #[arg(long)]
         phase: String,
     },
+    Close {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        phase: String,
+    },
 }
 
 #[derive(clap::Args, Debug)]

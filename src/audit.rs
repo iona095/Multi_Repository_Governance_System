@@ -354,7 +354,7 @@ fn audit_ledger_path(gov_dir: &Path) -> PathBuf {
     gov_dir.join(AUDIT_LEDGER_FILENAME)
 }
 
-fn read_audit_ledger(gov_dir: &Path) -> Result<Option<AuditLedger>, Error> {
+pub(crate) fn read_audit_ledger(gov_dir: &Path) -> Result<Option<AuditLedger>, Error> {
     let path = audit_ledger_path(gov_dir);
     if !path.exists() {
         return Ok(None);
@@ -373,7 +373,7 @@ fn read_audit_ledger(gov_dir: &Path) -> Result<Option<AuditLedger>, Error> {
 // Subject Construction (Section 7 + 8)
 // ============================================================================
 
-fn build_audit_subject(
+pub(crate) fn build_audit_subject(
     auth: &ValidatedAuthority,
     git: &GitRunner,
     impl_record: &ImplementationAuthority,
@@ -1254,7 +1254,10 @@ fn validate_ledger_authority(
     Ok(())
 }
 
-fn validate_ledger_history(ledger: &AuditLedger, auth: &ValidatedAuthority) -> Result<(), Error> {
+pub(crate) fn validate_ledger_history(
+    ledger: &AuditLedger,
+    auth: &ValidatedAuthority,
+) -> Result<(), Error> {
     for (idx, round) in ledger.rounds.iter().enumerate() {
         let expected_round = (idx + 1) as u32;
         if round.round != expected_round {

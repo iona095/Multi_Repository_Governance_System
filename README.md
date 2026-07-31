@@ -19,6 +19,7 @@ mrgs implementation check --repo <REPOSITORY_PATH>
 mrgs audit begin --repo <REPOSITORY_PATH> --auditor <AUDITOR_ID>
 mrgs audit record --repo <REPOSITORY_PATH> --report <REPORT_PATH>
 mrgs repair check --repo <REPOSITORY_PATH>
+mrgs phase close --repo <REPOSITORY_PATH> --phase <PHASE_ID>
 ```
 
 ## Commands

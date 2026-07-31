@@ -372,6 +372,20 @@ pub enum Error {
     RepairNoChange,
     #[error("REPAIR_SUBJECT_STALE")]
     RepairSubjectStale,
+
+    // Phase 6 errors
+    #[error("CLOSEOUT_NOT_READY")]
+    CloseoutNotReady,
+    #[error("CLOSEOUT_LEDGER_INVALID")]
+    CloseoutLedgerInvalid,
+    #[error("CLOSEOUT_LEDGER_STALE")]
+    CloseoutLedgerStale,
+    #[error("CLOSEOUT_CONFLICT")]
+    CloseoutConflict,
+    #[error("CLOSEOUT_ARCHIVE_MISMATCH")]
+    CloseoutArchiveMismatch,
+    #[error("CLOSEOUT_STATE_MISMATCH")]
+    CloseoutStateMismatch,
 }
 
 impl Error {
@@ -521,6 +535,13 @@ impl Error {
             Error::UnknownActivePhase(_) => "GOVERNANCE_AUTHORITY_INVALID",
             Error::ActivePhaseAlsoClosed(_) => "GOVERNANCE_AUTHORITY_INVALID",
             Error::InconsistentClosedDep(_, _) => "GOVERNANCE_AUTHORITY_INVALID",
+            // Phase 6 categories
+            Error::CloseoutNotReady => "CLOSEOUT_NOT_READY",
+            Error::CloseoutLedgerInvalid => "CLOSEOUT_LEDGER_INVALID",
+            Error::CloseoutLedgerStale => "CLOSEOUT_LEDGER_STALE",
+            Error::CloseoutConflict => "CLOSEOUT_CONFLICT",
+            Error::CloseoutArchiveMismatch => "CLOSEOUT_ARCHIVE_MISMATCH",
+            Error::CloseoutStateMismatch => "CLOSEOUT_STATE_MISMATCH",
         }
     }
 }
