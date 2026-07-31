@@ -386,6 +386,20 @@ pub enum Error {
     CloseoutArchiveMismatch,
     #[error("CLOSEOUT_STATE_MISMATCH")]
     CloseoutStateMismatch,
+
+    // Phase 7 errors
+    #[error("CONTINUITY_METADATA_INVALID")]
+    ContinuityMetadataInvalid,
+    #[error("CONTINUITY_LEDGER_INVALID")]
+    ContinuityLedgerInvalid,
+    #[error("CONTINUITY_LEDGER_STALE")]
+    ContinuityLedgerStale,
+    #[error("CONTINUITY_CONFLICT")]
+    ContinuityConflict,
+    #[error("CONTINUITY_SOURCE_INVALID")]
+    ContinuitySourceInvalid,
+    #[error("CONTINUITY_SOURCE_MISMATCH")]
+    ContinuitySourceMismatch,
 }
 
 impl Error {
@@ -542,6 +556,13 @@ impl Error {
             Error::CloseoutConflict => "CLOSEOUT_CONFLICT",
             Error::CloseoutArchiveMismatch => "CLOSEOUT_ARCHIVE_MISMATCH",
             Error::CloseoutStateMismatch => "CLOSEOUT_STATE_MISMATCH",
+            // Phase 7 categories
+            Error::ContinuityMetadataInvalid => "CONTINUITY_METADATA_INVALID",
+            Error::ContinuityLedgerInvalid => "CONTINUITY_LEDGER_INVALID",
+            Error::ContinuityLedgerStale => "CONTINUITY_LEDGER_STALE",
+            Error::ContinuityConflict => "CONTINUITY_CONFLICT",
+            Error::ContinuitySourceInvalid => "CONTINUITY_SOURCE_INVALID",
+            Error::ContinuitySourceMismatch => "CONTINUITY_SOURCE_MISMATCH",
         }
     }
 }

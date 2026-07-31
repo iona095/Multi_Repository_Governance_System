@@ -1,6 +1,7 @@
 mod audit;
 mod cli;
 mod closeout;
+mod continuity;
 mod contract;
 mod error;
 mod git;
@@ -68,6 +69,16 @@ fn main() {
         },
         cli::CliCommand::Repair(sub) => match sub.action {
             cli::RepairAction::Check { repo } => (audit::cmd_repair_check(&repo), true),
+        },
+        cli::CliCommand::Continuity(sub) => match sub.action {
+            cli::ContinuityAction::Record {
+                repo,
+                metadata,
+                source_repo,
+            } => (
+                continuity::cmd_continuity_record(&repo, &metadata, &source_repo),
+                true,
+            ),
         },
     };
 

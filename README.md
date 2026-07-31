@@ -20,6 +20,7 @@ mrgs audit begin --repo <REPOSITORY_PATH> --auditor <AUDITOR_ID>
 mrgs audit record --repo <REPOSITORY_PATH> --report <REPORT_PATH>
 mrgs repair check --repo <REPOSITORY_PATH>
 mrgs phase close --repo <REPOSITORY_PATH> --phase <PHASE_ID>
+mrgs continuity record --repo <REPOSITORY_PATH> --metadata <METADATA_PATH> [--source-repo <SOURCE_REPOSITORY_PATH>]...
 ```
 
 ## Commands
@@ -39,6 +40,14 @@ Registers a contract draft for the currently active phase. Requires an existing 
 ### `contract accept`
 
 Accepts the current contract draft. Requires the exact revision, SHA-256, and `ACCEPTED` decision. Creates or appends to `.mrgs/accepted-contract.json`. Prints `ACCEPTED <contract_id> <revision> <sha256>`. Idempotent for the current accepted revision.
+
+### `phase close`
+
+Closes the active phase: validates the full Phase 1-5 authority chain, archives the phase-scoped governance files into a final manifest, builds a chained completion receipt, and atomically publishes `.mrgs/completion-ledger.json`. Prints `PHASE_CLOSED <phase_id> <completion_sequence> <final_manifest_sha256> <completion_receipt_sha256>`. Idempotent for a completed phase.
+
+### `continuity record`
+
+Records deterministic, privacy-minimal continuity metadata for a completed phase into the append-only `.mrgs/continuity-ledger.json`. The `--metadata` file is strict TOML (schema version 1) with explicit `repository_id`, `continuity_id`, `phase_id`, the exact `completion_receipt_sha256` of a closed phase, `note`, `models`, `hosts`, and optional `links`. Each link is a `continues_from` predecessor relation that is verified locally against `--source-repo` repositories (completion proof, and optionally the source continuity receipt). The exact metadata bytes are archived with a deterministic continuity manifest and chained continuity receipt. Exact replay of an identical record returns the original output and preserves every byte; conflicts and ledger corruption fail closed. No host or model discovery, telemetry, network access, or Git mutation is performed. Prints `CONTINUITY_RECORDED <repository_id> <phase_id> <continuity_sequence> <continuity_manifest_sha256> <continuity_receipt_sha256>`.
 
 ### `contract revise`
 

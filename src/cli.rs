@@ -15,6 +15,7 @@ pub enum CliCommand {
     Implementation(ImplementationSub),
     Audit(AuditSub),
     Repair(RepairSub),
+    Continuity(ContinuitySub),
 }
 
 #[derive(clap::Args, Debug)]
@@ -146,5 +147,23 @@ pub enum RepairAction {
     Check {
         #[arg(long)]
         repo: String,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ContinuitySub {
+    #[command(subcommand)]
+    pub action: ContinuityAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ContinuityAction {
+    Record {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        metadata: String,
+        #[arg(long = "source-repo")]
+        source_repo: Vec<String>,
     },
 }

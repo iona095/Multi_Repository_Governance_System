@@ -120,7 +120,7 @@ pub struct ArchivedGovernance {
 // Completion Receipt (Section 11)
 // ============================================================================
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompletionReceipt {
     pub schema_version: u32,
@@ -210,7 +210,7 @@ fn file_exists(gov_dir: &Path, filename: &str) -> bool {
 // Completion Ledger Reading and Validation
 // ============================================================================
 
-fn read_completion_ledger(gov_dir: &Path) -> Result<Option<CompletionLedger>, Error> {
+pub(crate) fn read_completion_ledger(gov_dir: &Path) -> Result<Option<CompletionLedger>, Error> {
     let path = gov_dir.join("completion-ledger.json");
     if !path.exists() {
         return Ok(None);
@@ -312,7 +312,7 @@ fn read_completion_ledger(gov_dir: &Path) -> Result<Option<CompletionLedger>, Er
     Ok(Some(ledger))
 }
 
-fn validate_completion_ledger(
+pub(crate) fn validate_completion_ledger(
     ledger: &CompletionLedger,
     accepted_plan_sha256: &str,
     plan_id: &str,
@@ -469,7 +469,7 @@ fn validate_completion_ledger(
 // State-to-Ledger Relation (Section 14)
 // ============================================================================
 
-fn validate_state_ledger_relation(
+pub(crate) fn validate_state_ledger_relation(
     state: &GovernanceState,
     ledger: Option<&CompletionLedger>,
 ) -> Result<(), Error> {

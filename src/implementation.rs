@@ -1221,7 +1221,7 @@ fn validate_begin_cleanliness(
     for record in parse_porcelain_output(&out.stdout)? {
         let xy_0 = record.xy.as_bytes()[0] as char;
         if xy_0 == '?' && record.xy == "??" {
-            if !is_exempt_governance_path(&record.path, auth, tracked_governance) {
+            if !is_exempt_governance_path(&record.path, auth, tracked_governance)? {
                 return Err(Error::GitDirty);
             }
             continue;
@@ -1252,7 +1252,7 @@ fn validate_begin_cleanliness(
         return Err(Error::GitCommandFailed("ls-files ignored failed".into()));
     }
     for path in parse_ignored_output(&ignored_out.stdout)? {
-        if !is_exempt_governance_path(&path, auth, tracked_governance) {
+        if !is_exempt_governance_path(&path, auth, tracked_governance)? {
             return Err(Error::GitDirty);
         }
     }
@@ -1262,9 +1262,32 @@ fn validate_begin_cleanliness(
 
 fn is_exempt_governance_path(
     path: &str,
-    _auth: &ValidatedAuthority,
+    auth: &ValidatedAuthority,
     tracked_governance: &[String],
-) -> bool {
+) -> Result<bool, Error> {
+    // Phase 7: an unsafe filesystem object at the exact continuity-ledger
+    // path (or a directory masquerading as the ledger with child paths) is
+    // never exempt. Existing Phase 4/5 commands must fail closed with the
+    // filesystem-boundary category when git reports such a path through the
+    // implementation/audit boundary (Phase 7 contract sections 2 and 23).
+    let is_ledger_exact = path == ".mrgs/continuity-ledger.json";
+    let is_ledger_child = path.starts_with(".mrgs/continuity-ledger.json/");
+    if is_ledger_exact || is_ledger_child {
+        let ledger_path = auth.gov_dir.join("continuity-ledger.json");
+        let safe = match std::fs::symlink_metadata(&ledger_path) {
+            Ok(meta) => meta.file_type().is_file() && !has_reparse_attribute(&meta),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        };
+        if !safe {
+            return Err(Error::FilesystemBoundaryUnsafe);
+        }
+        if is_ledger_child {
+            // A child path of the safe regular ledger cannot exist; it is
+            // never exempt even when untracked.
+            return Ok(false);
+        }
+    }
     let gov_paths = [
         ".mrgs/accepted-plan.json",
         ".mrgs/state.json",
@@ -1273,10 +1296,23 @@ fn is_exempt_governance_path(
         ".mrgs/implementation-authority.json",
         ".mrgs/audit-ledger.json",
         ".mrgs/completion-ledger.json",
+        ".mrgs/continuity-ledger.json",
     ];
     // Only exempt one of the exact fixed paths AND only when Section 6.4
     // proved that no tracked index entry exists for it (contract §6.5).
-    gov_paths.contains(&path) && !tracked_governance.iter().any(|p| p == path)
+    Ok(gov_paths.contains(&path) && !tracked_governance.iter().any(|p| p == path))
+}
+
+#[cfg(windows)]
+fn has_reparse_attribute(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn has_reparse_attribute(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn is_governance_path(path: &str) -> bool {
@@ -2763,7 +2799,7 @@ fn build_change_inventory_with_raw(
     {
         for record in parse_porcelain_output(&status_out.stdout)? {
             if record.xy == "??" {
-                if is_exempt_governance_path(&record.path, auth, tracked_governance) {
+                if is_exempt_governance_path(&record.path, auth, tracked_governance)? {
                     continue;
                 }
                 paths.insert(record.path);
@@ -2799,7 +2835,7 @@ fn build_change_inventory_with_raw(
     }
     {
         for path in parse_ignored_output(&ignored_out.stdout)? {
-            if !is_exempt_governance_path(&path, auth, tracked_governance) {
+            if !is_exempt_governance_path(&path, auth, tracked_governance)? {
                 paths.insert(path);
             }
         }
@@ -3367,42 +3403,22 @@ mod p2a_tests {
         // `.mrgs/state.json` reported as an untracked `??` path, but Section 6.4
         // proved a tracked index entry exists for it -> not exempt.
         let tracked = vec![".mrgs/state.json".to_string()];
-        assert!(!is_exempt_governance_path(
-            ".mrgs/state.json",
-            &auth,
-            &tracked
-        ));
+        assert!(!is_exempt_governance_path(".mrgs/state.json", &auth, &tracked).unwrap());
         // A different fixed governance path with no tracked entry IS exempt.
         let none_tracked: Vec<String> = vec![];
-        assert!(is_exempt_governance_path(
-            ".mrgs/state.json",
-            &auth,
-            &none_tracked
-        ));
+        assert!(is_exempt_governance_path(".mrgs/state.json", &auth, &none_tracked).unwrap());
         // A non-governance path is never exempt regardless of tracking.
-        assert!(!is_exempt_governance_path(
-            "src/main.rs",
-            &auth,
-            &none_tracked
-        ));
+        assert!(!is_exempt_governance_path("src/main.rs", &auth, &none_tracked).unwrap());
         // A tracked `.MRGS/state.json` (case alias) is gated using the exact
         // path git reports: the exemption for `.mrgs/state.json` is unaffected
         // only because git reports the alias under its own bytes; the alias
         // path itself would be gated if it were the one being exempted.
         let tracked_alias = vec![".MRGS/state.json".to_string()];
-        assert!(!is_exempt_governance_path(
-            ".MRGS/state.json",
-            &auth,
-            &tracked_alias
-        ));
+        assert!(!is_exempt_governance_path(".MRGS/state.json", &auth, &tracked_alias).unwrap());
         // When git reports `.mrgs/state.json` exactly and it is tracked, it is
         // gated precisely (exact bytes, no normalization).
         let tracked_exact = vec![".mrgs/state.json".to_string()];
-        assert!(!is_exempt_governance_path(
-            ".mrgs/state.json",
-            &auth,
-            &tracked_exact
-        ));
+        assert!(!is_exempt_governance_path(".mrgs/state.json", &auth, &tracked_exact).unwrap());
     }
 
     // P2-A: exact fixed-governance exemption set is exactly the five contract
@@ -3435,18 +3451,67 @@ mod p2a_tests {
             ".mrgs/implementation-authority.json",
             ".mrgs/audit-ledger.json",
             ".mrgs/completion-ledger.json",
+            ".mrgs/continuity-ledger.json",
         ] {
-            assert!(is_exempt_governance_path(p, &auth, &none));
+            assert!(is_exempt_governance_path(p, &auth, &none).unwrap());
         }
         // Unknown / temporary / child `.mrgs` paths are never exempt.
         for p in [
             ".mrgs/extra.json",
             ".mrgs/.tmp_x.tmp",
             ".mrgs/sub/draft.json",
+            ".mrgs/continuity-ledger.json/sub.json",
             "src/main.rs",
         ] {
-            assert!(!is_exempt_governance_path(p, &auth, &none));
+            assert!(!is_exempt_governance_path(p, &auth, &none).unwrap());
         }
+    }
+
+    // P2-A/Phase 7: an unsafe filesystem object at the exact continuity-ledger
+    // path must fail closed with the filesystem-boundary category instead of
+    // being exempted, through the implementation/audit boundary.
+    #[test]
+    fn unsafe_continuity_ledger_topology_fails_closed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let gov_dir = dir.path().join(".mrgs");
+        std::fs::create_dir(&gov_dir).unwrap();
+        let auth = ValidatedAuthority {
+            repo: dir.path().to_path_buf(),
+            gov_dir: gov_dir.clone(),
+            accepted_plan_sha256: String::new(),
+            active_phase: String::new(),
+            contract_id: String::new(),
+            final_revision: 1,
+            final_source_path: String::new(),
+            final_sha256: String::new(),
+            final_content: String::new(),
+            rule_set: PathRuleSet {
+                allowed: vec![],
+                forbidden: vec![],
+            },
+            lifecycle: "ACCEPTED",
+        };
+        let none: Vec<String> = vec![];
+        // A directory at the fixed ledger path is unsafe topology.
+        std::fs::create_dir(gov_dir.join("continuity-ledger.json")).unwrap();
+        assert!(matches!(
+            is_exempt_governance_path(".mrgs/continuity-ledger.json", &auth, &none),
+            Err(Error::FilesystemBoundaryUnsafe)
+        ));
+        assert!(matches!(
+            is_exempt_governance_path(".mrgs/continuity-ledger.json/x", &auth, &none),
+            Err(Error::FilesystemBoundaryUnsafe)
+        ));
+        std::fs::remove_dir(gov_dir.join("continuity-ledger.json")).unwrap();
+
+        // A safe regular file at the exact path IS exempt when untracked.
+        std::fs::write(gov_dir.join("continuity-ledger.json"), b"{}").unwrap();
+        assert!(is_exempt_governance_path(".mrgs/continuity-ledger.json", &auth, &none).unwrap());
+        // ... but never when a tracked index entry exists for it.
+        let tracked = vec![".mrgs/continuity-ledger.json".to_string()];
+        assert!(
+            !is_exempt_governance_path(".mrgs/continuity-ledger.json", &auth, &tracked).unwrap()
+        );
     }
 
     // P2-A: a tracked `.mrgs` index entry is rejected by the same stage parser
