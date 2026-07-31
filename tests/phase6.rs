@@ -714,7 +714,11 @@ fn test_obligation_15_changed_branch_rejects() {
     let out = t.phase_close("phase-1");
     assert_failure(&out);
     let err = stderr_str(&out);
-    assert!(err.contains("error:"), "expected error output, got: {}", err);
+    assert!(
+        err.contains("error:"),
+        "expected error output, got: {}",
+        err
+    );
     // Switch back to main for cleanup
     let _ = Command::new("git")
         .arg("-C")
