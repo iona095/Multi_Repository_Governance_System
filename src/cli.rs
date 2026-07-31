@@ -13,6 +13,8 @@ pub enum CliCommand {
     Phase(PhaseSub),
     Contract(ContractSub),
     Implementation(ImplementationSub),
+    Audit(AuditSub),
+    Repair(RepairSub),
 }
 
 #[derive(clap::Args, Debug)]
@@ -99,6 +101,42 @@ pub enum ImplementationAction {
         #[arg(long)]
         sha256: String,
     },
+    Check {
+        #[arg(long)]
+        repo: String,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AuditSub {
+    #[command(subcommand)]
+    pub action: AuditAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuditAction {
+    Begin {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        auditor: String,
+    },
+    Record {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        report: String,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct RepairSub {
+    #[command(subcommand)]
+    pub action: RepairAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RepairAction {
     Check {
         #[arg(long)]
         repo: String,

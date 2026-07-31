@@ -340,6 +340,38 @@ pub enum Error {
     RepositoryInvalid,
     #[error("PERSISTENCE_FAILED")]
     PersistenceFailed,
+
+    // Phase 5 errors
+    #[error("AUDITOR_ID_INVALID")]
+    AuditorIdInvalid,
+    #[error("AUDIT_LEDGER_MISSING")]
+    AuditLedgerMissing,
+    #[error("AUDIT_LEDGER_INVALID")]
+    AuditLedgerInvalid,
+    #[error("AUDIT_LEDGER_STALE")]
+    AuditLedgerStale,
+    #[error("AUDIT_PENDING_CONFLICT")]
+    AuditPendingConflict,
+    #[error("AUDIT_NOT_PENDING")]
+    AuditNotPending,
+    #[error("AUDIT_TERMINAL")]
+    AuditTerminal,
+    #[error("AUDIT_SUBJECT_STALE")]
+    AuditSubjectStale,
+    #[error("AUDIT_REPORT_INVALID")]
+    AuditReportInvalid,
+    #[error("AUDIT_REPORT_MISMATCH")]
+    AuditReportMismatch,
+    #[error("AUDIT_REPORT_CONFLICT")]
+    AuditReportConflict,
+    #[error("REPAIR_NOT_ROUTED")]
+    RepairNotRouted,
+    #[error("REPAIR_SCOPE_VIOLATION")]
+    RepairScopeViolation,
+    #[error("REPAIR_NO_CHANGE")]
+    RepairNoChange,
+    #[error("REPAIR_SUBJECT_STALE")]
+    RepairSubjectStale,
 }
 
 impl Error {
@@ -466,6 +498,22 @@ impl Error {
             Error::DraftPreimageRevisionZero => "GOVERNANCE_AUTHORITY_INVALID",
             Error::DraftPreimageRevisionMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
             Error::DraftPreimageShaInvalid => "GOVERNANCE_AUTHORITY_INVALID",
+            // Phase 5 categories
+            Error::AuditorIdInvalid => "AUDITOR_ID_INVALID",
+            Error::AuditLedgerMissing => "AUDIT_LEDGER_MISSING",
+            Error::AuditLedgerInvalid => "AUDIT_LEDGER_INVALID",
+            Error::AuditLedgerStale => "AUDIT_LEDGER_STALE",
+            Error::AuditPendingConflict => "AUDIT_PENDING_CONFLICT",
+            Error::AuditNotPending => "AUDIT_NOT_PENDING",
+            Error::AuditTerminal => "AUDIT_TERMINAL",
+            Error::AuditSubjectStale => "AUDIT_SUBJECT_STALE",
+            Error::AuditReportInvalid => "AUDIT_REPORT_INVALID",
+            Error::AuditReportMismatch => "AUDIT_REPORT_MISMATCH",
+            Error::AuditReportConflict => "AUDIT_REPORT_CONFLICT",
+            Error::RepairNotRouted => "REPAIR_NOT_ROUTED",
+            Error::RepairScopeViolation => "REPAIR_SCOPE_VIOLATION",
+            Error::RepairNoChange => "REPAIR_NO_CHANGE",
+            Error::RepairSubjectStale => "REPAIR_SUBJECT_STALE",
             Error::GovernanceAuthorityInvalid => "GOVERNANCE_AUTHORITY_INVALID",
             Error::PhaseCountMismatch { .. } => "GOVERNANCE_AUTHORITY_INVALID",
             Error::UnknownClosedPhase(_) => "GOVERNANCE_AUTHORITY_INVALID",

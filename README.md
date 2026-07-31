@@ -3,6 +3,8 @@
 Phase 1 — Accepted Plan Authority and Phase Selection
 Phase 2 — Active-Phase Contract Draft Registration
 Phase 3 — Contract Acceptance, Revision, and Lifecycle Transitions
+Phase 4 — Contract-Bound Implementation Enforcement
+Phase 5 — Independent Audit and Bounded Repair Routing
 
 ## CLI
 
@@ -12,6 +14,11 @@ mrgs phase select --repo <REPOSITORY_PATH> --phase <PHASE_ID>
 mrgs contract draft --repo <REPOSITORY_PATH> --contract <CONTRACT_PATH>
 mrgs contract accept --repo <REPOSITORY_PATH> --revision <REVISION> --sha256 <SHA256> --decision <DECISION>
 mrgs contract revise --repo <REPOSITORY_PATH> --contract <CONTRACT_PATH> --expected-revision <REVISION> --expected-sha256 <SHA256>
+mrgs implementation begin --repo <REPOSITORY_PATH> --revision <REVISION> --sha256 <SHA256>
+mrgs implementation check --repo <REPOSITORY_PATH>
+mrgs audit begin --repo <REPOSITORY_PATH> --auditor <AUDITOR_ID>
+mrgs audit record --repo <REPOSITORY_PATH> --report <REPORT_PATH>
+mrgs repair check --repo <REPOSITORY_PATH>
 ```
 
 ## Commands

@@ -1,3 +1,4 @@
+mod audit;
 mod cli;
 mod contract;
 mod error;
@@ -52,6 +53,17 @@ fn main() {
                 sha256,
             } => (cmd_implementation_begin(&repo, &revision, &sha256), true),
             cli::ImplementationAction::Check { repo } => (cmd_implementation_check(&repo), true),
+        },
+        cli::CliCommand::Audit(sub) => match sub.action {
+            cli::AuditAction::Begin { repo, auditor } => {
+                (audit::cmd_audit_begin(&repo, &auditor), true)
+            }
+            cli::AuditAction::Record { repo, report } => {
+                (audit::cmd_audit_record(&repo, &report), true)
+            }
+        },
+        cli::CliCommand::Repair(sub) => match sub.action {
+            cli::RepairAction::Check { repo } => (audit::cmd_repair_check(&repo), true),
         },
     };
 

@@ -200,7 +200,8 @@ fn validate_governance_filename(filename: &str) -> Result<(), crate::error::Erro
         | "state.json"
         | "contract-draft.json"
         | "accepted-contract.json"
-        | "implementation-authority.json" => {}
+        | "implementation-authority.json"
+        | "audit-ledger.json" => {}
         _ => {
             return Err(crate::error::Error::UnauthorizedFilename(
                 filename.to_string(),

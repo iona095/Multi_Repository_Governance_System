@@ -274,7 +274,7 @@ pub fn validate_phase4_authority(repo_arg: &str) -> Result<ValidatedAuthority, E
     })
 }
 
-fn validate_impl_record_against_auth(
+pub(crate) fn validate_impl_record_against_auth(
     record: &ImplementationAuthority,
     auth: &ValidatedAuthority,
 ) -> Result<(), Error> {
@@ -1271,6 +1271,7 @@ fn is_exempt_governance_path(
         ".mrgs/contract-draft.json",
         ".mrgs/accepted-contract.json",
         ".mrgs/implementation-authority.json",
+        ".mrgs/audit-ledger.json",
     ];
     // Only exempt one of the exact fixed paths AND only when Section 6.4
     // proved that no tracked index entry exists for it (contract §6.5).
@@ -1650,7 +1651,7 @@ pub fn cmd_implementation_check(repo_arg: &str) -> Result<String, Error> {
     // Build change inventory
     let tracked_gov = tracked_governance_paths(&git, &objfmt)?;
     let (inventory, raw_entries) =
-        build_change_inventory(&git, &record, &auth, &_objfmt, &tracked_gov)?;
+        build_change_inventory_with_raw(&git, &record, &auth, &_objfmt, &tracked_gov)?;
 
     // Validate paths with symlink and filesystem checks
     let mut validated_count = 0u32;
@@ -2715,7 +2716,19 @@ fn parse_ignored_output(stdout: &[u8]) -> Result<Vec<String>, Error> {
     Ok(paths)
 }
 
-fn build_change_inventory(
+pub(crate) fn build_change_inventory(
+    git: &GitRunner,
+    record: &ImplementationAuthority,
+    auth: &ValidatedAuthority,
+    objfmt: &str,
+    tracked_governance: &[String],
+) -> Result<BTreeSet<String>, Error> {
+    let (paths, _) =
+        build_change_inventory_with_raw(git, record, auth, objfmt, tracked_governance)?;
+    Ok(paths)
+}
+
+fn build_change_inventory_with_raw(
     git: &GitRunner,
     record: &ImplementationAuthority,
     auth: &ValidatedAuthority,
