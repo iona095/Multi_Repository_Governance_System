@@ -1265,27 +1265,31 @@ fn is_exempt_governance_path(
     auth: &ValidatedAuthority,
     tracked_governance: &[String],
 ) -> Result<bool, Error> {
-    // Phase 7: an unsafe filesystem object at the exact continuity-ledger
-    // path (or a directory masquerading as the ledger with child paths) is
-    // never exempt. Existing Phase 4/5 commands must fail closed with the
-    // filesystem-boundary category when git reports such a path through the
-    // implementation/audit boundary (Phase 7 contract sections 2 and 23).
-    let is_ledger_exact = path == ".mrgs/continuity-ledger.json";
-    let is_ledger_child = path.starts_with(".mrgs/continuity-ledger.json/");
-    if is_ledger_exact || is_ledger_child {
-        let ledger_path = auth.gov_dir.join("continuity-ledger.json");
-        let safe = match std::fs::symlink_metadata(&ledger_path) {
-            Ok(meta) => meta.file_type().is_file() && !has_reparse_attribute(&meta),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-            Err(_) => false,
-        };
-        if !safe {
-            return Err(Error::FilesystemBoundaryUnsafe);
-        }
-        if is_ledger_child {
-            // A child path of the safe regular ledger cannot exist; it is
-            // never exempt even when untracked.
-            return Ok(false);
+    // Phase 7/8: an unsafe filesystem object at the exact continuity- or
+    // recovery-ledger path (or a directory masquerading as the ledger with
+    // child paths) is never exempt. Existing Phase 4/5 commands must fail
+    // closed with the filesystem-boundary category when git reports such a
+    // path through the implementation/audit boundary (Phase 7 contract
+    // section 2/23 and Phase 8 contract section 23).
+    for ledger_filename in ["continuity-ledger.json", "recovery-ledger.json"] {
+        let ledger_rel = format!(".mrgs/{}", ledger_filename);
+        let is_ledger_exact = path == ledger_rel;
+        let is_ledger_child = path.starts_with(&format!("{}/", ledger_rel));
+        if is_ledger_exact || is_ledger_child {
+            let ledger_path = auth.gov_dir.join(ledger_filename);
+            let safe = match std::fs::symlink_metadata(&ledger_path) {
+                Ok(meta) => meta.file_type().is_file() && !has_reparse_attribute(&meta),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(_) => false,
+            };
+            if !safe {
+                return Err(Error::FilesystemBoundaryUnsafe);
+            }
+            if is_ledger_child {
+                // A child path of the safe regular ledger cannot exist; it is
+                // never exempt even when untracked.
+                return Ok(false);
+            }
         }
     }
     let gov_paths = [
@@ -1297,6 +1301,7 @@ fn is_exempt_governance_path(
         ".mrgs/audit-ledger.json",
         ".mrgs/completion-ledger.json",
         ".mrgs/continuity-ledger.json",
+        ".mrgs/recovery-ledger.json",
     ];
     // Only exempt one of the exact fixed paths AND only when Section 6.4
     // proved that no tracked index entry exists for it (contract §6.5).

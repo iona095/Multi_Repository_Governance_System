@@ -695,7 +695,7 @@ struct ContinuityLedgerEntry {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ContinuityLedgerFile {
+pub(crate) struct ContinuityLedgerFile {
     schema_version: u32,
     accepted_plan_sha256: String,
     plan_id: String,
@@ -781,7 +781,11 @@ const RESOLVED_LINK_KEYS: [&str; 12] = [
     "source_continuity_receipt_sha256",
 ];
 
-fn read_continuity_ledger(gov_dir: &Path) -> Result<Option<ContinuityLedgerFile>, Error> {
+// Narrowly exposed as pub(crate) for Phase 8 recovery validation; recovery
+// must not duplicate Phase 7 ledger interpretation.
+pub(crate) fn read_continuity_ledger(
+    gov_dir: &Path,
+) -> Result<Option<ContinuityLedgerFile>, Error> {
     let path = gov_dir.join("continuity-ledger.json");
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
@@ -838,7 +842,7 @@ fn read_continuity_ledger(gov_dir: &Path) -> Result<Option<ContinuityLedgerFile>
     Ok(Some(ledger))
 }
 
-fn validate_continuity_ledger(
+pub(crate) fn validate_continuity_ledger(
     ledger: &ContinuityLedgerFile,
     accepted_plan_sha256: &str,
     plan_id: &str,

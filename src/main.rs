@@ -8,6 +8,7 @@ mod git;
 mod implementation;
 mod path;
 mod plan;
+mod recovery;
 mod rules;
 mod state;
 
@@ -77,6 +78,18 @@ fn main() {
                 source_repo,
             } => (
                 continuity::cmd_continuity_record(&repo, &metadata, &source_repo),
+                true,
+            ),
+        },
+        cli::CliCommand::Recovery(sub) => match sub.action {
+            cli::RecoveryAction::Inspect { repo } => (recovery::cmd_recovery_inspect(&repo), true),
+            cli::RecoveryAction::Apply {
+                repo,
+                recovery_id,
+                subject_sha256,
+                decision,
+            } => (
+                recovery::cmd_recovery_apply(&repo, &recovery_id, &subject_sha256, &decision),
                 true,
             ),
         },

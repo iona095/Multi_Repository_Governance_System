@@ -16,6 +16,7 @@ pub enum CliCommand {
     Audit(AuditSub),
     Repair(RepairSub),
     Continuity(ContinuitySub),
+    Recovery(RecoverySub),
 }
 
 #[derive(clap::Args, Debug)]
@@ -165,5 +166,29 @@ pub enum ContinuityAction {
         metadata: String,
         #[arg(long = "source-repo")]
         source_repo: Vec<String>,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub struct RecoverySub {
+    #[command(subcommand)]
+    pub action: RecoveryAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RecoveryAction {
+    Inspect {
+        #[arg(long)]
+        repo: String,
+    },
+    Apply {
+        #[arg(long)]
+        repo: String,
+        #[arg(long = "recovery-id")]
+        recovery_id: String,
+        #[arg(long = "subject-sha256")]
+        subject_sha256: String,
+        #[arg(long)]
+        decision: String,
     },
 }

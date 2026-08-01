@@ -5,6 +5,9 @@ Phase 2 — Active-Phase Contract Draft Registration
 Phase 3 — Contract Acceptance, Revision, and Lifecycle Transitions
 Phase 4 — Contract-Bound Implementation Enforcement
 Phase 5 — Independent Audit and Bounded Repair Routing
+Phase 6 — Phase Closeout and Completion Ledger
+Phase 7 — Model, Host, and Cross-Repository Continuity Metadata
+Phase 8 — State Recovery and Corruption Handling
 
 ## CLI
 
@@ -21,6 +24,8 @@ mrgs audit record --repo <REPOSITORY_PATH> --report <REPORT_PATH>
 mrgs repair check --repo <REPOSITORY_PATH>
 mrgs phase close --repo <REPOSITORY_PATH> --phase <PHASE_ID>
 mrgs continuity record --repo <REPOSITORY_PATH> --metadata <METADATA_PATH> [--source-repo <SOURCE_REPOSITORY_PATH>]...
+mrgs recovery inspect --repo <REPOSITORY_PATH>
+mrgs recovery apply --repo <REPOSITORY_PATH> --recovery-id <RECOVERY_ID> --subject-sha256 <SUBJECT_SHA256> --decision <DECISION>
 ```
 
 ## Commands
@@ -48,6 +53,14 @@ Closes the active phase: validates the full Phase 1-5 authority chain, archives 
 ### `continuity record`
 
 Records deterministic, privacy-minimal continuity metadata for a completed phase into the append-only `.mrgs/continuity-ledger.json`. The `--metadata` file is strict TOML (schema version 1) with explicit `repository_id`, `continuity_id`, `phase_id`, the exact `completion_receipt_sha256` of a closed phase, `note`, `models`, `hosts`, and optional `links`. Each link is a `continues_from` predecessor relation that is verified locally against `--source-repo` repositories (completion proof, and optionally the source continuity receipt). The exact metadata bytes are archived with a deterministic continuity manifest and chained continuity receipt. Exact replay of an identical record returns the original output and preserves every byte; conflicts and ledger corruption fail closed. No host or model discovery, telemetry, network access, or Git mutation is performed. Prints `CONTINUITY_RECORDED <repository_id> <phase_id> <continuity_sequence> <continuity_manifest_sha256> <continuity_receipt_sha256>`.
+
+### `recovery inspect`
+
+Read-only deterministic diagnosis of the exact governance subject: repository identity, a canonical inventory of every `.mrgs` child (except the recovery journal), and the plan source. Returns `RECOVERY_NOT_REQUIRED <subject_sha256>` for a healthy repository, `RECOVERY_REQUIRED <recovery_id> <subject_sha256> <action_count>` plus one `RECOVERY_ACTION <n> <kind> <target>` line per deterministic action for a recoverable subject, or `RECOVERY_PENDING <recovery_id> <next_action> <action_count>` while a journal entry is incomplete. Unrecoverable subjects fail closed with the exact recovery error category and no success output.
+
+### `recovery apply`
+
+Human-authorized application of a recovery plan bound to an exact recovery ID and subject SHA-256 (both lowercase 64-hex; the only accepted decision is exact `RECOVER`). The plan is recomputed from surviving Phase 1-7 authority, never from caller input. The pending entry is durably published to the append-only `.mrgs/recovery-ledger.json` before the first mutation; each action (`REMOVE_REDUNDANT_TEMP`, `RESTORE_ACCEPTED_PLAN`, `RESTORE_STATE`, `RESUME_CLOSEOUT`) is executed resumably against deterministic prefix subject hashes, with `next_action` advanced atomically. Completion writes a chained recovery receipt and prints `RECOVERY_APPLIED <recovery_sequence> <recovery_id> <pre_subject_sha256> <post_subject_sha256> <recovery_receipt_sha256>`. Exact replay of an applied recovery returns the original output; conflicts, stale subjects, and corrupt or stale journals fail closed before any mutation.
 
 ### `contract revise`
 

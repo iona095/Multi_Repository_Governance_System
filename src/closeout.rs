@@ -1258,8 +1258,12 @@ fn completed_idempotent(
 // ============================================================================
 // Resumable Finalization (Section 16)
 // ============================================================================
+//
+// Narrowly exposed as pub(crate) for Phase 8 recovery: `recovery apply`
+// resumes an incomplete closeout through this exact finalizer and must not
+// implement a second cleanup order or create a second completion entry.
 
-fn resumable_finalization(
+pub(crate) fn resumable_finalization(
     _repo: &Path,
     gov_dir: &Path,
     state: &mut GovernanceState,

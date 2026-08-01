@@ -400,6 +400,31 @@ pub enum Error {
     ContinuitySourceInvalid,
     #[error("CONTINUITY_SOURCE_MISMATCH")]
     ContinuitySourceMismatch,
+
+    // Phase 8 errors
+    #[error("RECOVERY_ID_INVALID")]
+    RecoveryIdInvalid,
+    #[error("RECOVERY_DECISION_INVALID")]
+    RecoveryDecisionInvalid,
+    // RECOVERY_NOT_REQUIRED is the healthy success output; the variant exists
+    // because the Phase 8 contract lists it among the exact error categories.
+    #[allow(dead_code)]
+    #[error("RECOVERY_NOT_REQUIRED")]
+    RecoveryNotRequired,
+    #[error("RECOVERY_UNRECOVERABLE")]
+    RecoveryUnrecoverable,
+    #[error("RECOVERY_LEDGER_INVALID")]
+    RecoveryLedgerInvalid,
+    #[error("RECOVERY_LEDGER_STALE")]
+    RecoveryLedgerStale,
+    #[error("RECOVERY_PENDING_CONFLICT")]
+    RecoveryPendingConflict,
+    #[error("RECOVERY_SUBJECT_STALE")]
+    RecoverySubjectStale,
+    #[error("RECOVERY_ACTION_FAILED")]
+    RecoveryActionFailed,
+    #[error("RECOVERY_POSTCONDITION_FAILED")]
+    RecoveryPostconditionFailed,
 }
 
 impl Error {
@@ -563,6 +588,17 @@ impl Error {
             Error::ContinuityConflict => "CONTINUITY_CONFLICT",
             Error::ContinuitySourceInvalid => "CONTINUITY_SOURCE_INVALID",
             Error::ContinuitySourceMismatch => "CONTINUITY_SOURCE_MISMATCH",
+            // Phase 8 categories
+            Error::RecoveryIdInvalid => "RECOVERY_ID_INVALID",
+            Error::RecoveryDecisionInvalid => "RECOVERY_DECISION_INVALID",
+            Error::RecoveryNotRequired => "RECOVERY_NOT_REQUIRED",
+            Error::RecoveryUnrecoverable => "RECOVERY_UNRECOVERABLE",
+            Error::RecoveryLedgerInvalid => "RECOVERY_LEDGER_INVALID",
+            Error::RecoveryLedgerStale => "RECOVERY_LEDGER_STALE",
+            Error::RecoveryPendingConflict => "RECOVERY_PENDING_CONFLICT",
+            Error::RecoverySubjectStale => "RECOVERY_SUBJECT_STALE",
+            Error::RecoveryActionFailed => "RECOVERY_ACTION_FAILED",
+            Error::RecoveryPostconditionFailed => "RECOVERY_POSTCONDITION_FAILED",
         }
     }
 }
