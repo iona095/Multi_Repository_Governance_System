@@ -66,6 +66,54 @@ fn test_only_publish_no_clobber(src: &Path, dst: &Path) -> Result<(), Error> {
     rename_noclobber(src, dst)
 }
 
+/// Phase 9 revision 2: debug-only pre-coordination barrier. Synchronized
+/// test callers signal here BEFORE any caller acquires the per-repository
+/// coordination guard, so exactly eight callers can be held at a common
+/// point in front of the production serialization. Uses only externally
+/// supplied test signal/release paths, creates no repository artifact, and
+/// is compiled out of release builds. The existing post-temp atomic
+/// publication hook is untouched.
+#[cfg(debug_assertions)]
+fn test_only_begin_before_coordination() -> Result<(), Error> {
+    let Some(signal) = std::env::var_os("MRGS_TEST_ONLY_BEGIN_BEFORE_COORDINATION_SIGNAL")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let Some(release) = std::env::var_os("MRGS_TEST_ONLY_BEGIN_BEFORE_COORDINATION_RELEASE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(signal)
+        .map_err(|_| Error::PersistenceFailed)?;
+    use std::io::Write;
+    file.write_all(b"reached")
+        .map_err(|_| Error::PersistenceFailed)?;
+    file.sync_all().map_err(|_| Error::PersistenceFailed)?;
+    drop(file);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !release.exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::PersistenceFailed);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn test_only_begin_before_coordination() -> Result<(), Error> {
+    Ok(())
+}
+
 /// Strictly accept exactly `expected` bytes, optionally followed by exactly one
 /// `\n` or one `\r\n`. No other leading or trailing byte, no repeated line
 /// terminator, no extra line, strict UTF-8 only.
@@ -1003,6 +1051,125 @@ fn parse_sha256_token(token: &str) -> Result<(), Error> {
     Ok(())
 }
 
+// ============================================================================
+// Phase 9 revision 2: per-repository `implementation begin` coordination
+//
+// Concurrent first-publication callers must not observe each other's
+// legitimate in-flight publisher temporary files during begin-time
+// cleanliness validation. A kernel coordination primitive serializes
+// callers per canonical repository across [existence classification,
+// cleanliness validation, first publication / existing-record validation,
+// idempotent/conflict resolution]. The primitive creates no durable
+// filesystem artifact (no lock file, no coordination file, nothing in the
+// repository, `.git`, another repository, or an external temporary
+// directory) and is released automatically by the operating system when a
+// participating process exits or crashes. Git remains read-only.
+// ============================================================================
+
+/// RAII guard held for the duration of the coordinated begin interval.
+struct BeginCoordinationGuard {
+    #[cfg(windows)]
+    handle: *mut std::ffi::c_void,
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+#[cfg(windows)]
+mod coordination_ffi {
+    extern "system" {
+        pub fn CreateMutexW(
+            lpMutexAttributes: *mut std::ffi::c_void,
+            bInitialOwner: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        pub fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
+        pub fn ReleaseMutex(hMutex: *mut std::ffi::c_void) -> i32;
+        pub fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+}
+
+/// Acquire the per-repository coordination for `implementation begin`.
+///
+/// Windows: OS-wide named mutex derived from the canonical repository path
+/// (case-folded so equivalent canonical references resolve to the same
+/// name). The kernel object leaves no filesystem artifact and is destroyed
+/// when the last handle closes; a crashed holder makes the mutex abandoned
+/// and the next waiter acquires it (WAIT_ABANDONED).
+///
+/// Unix: `flock(2)`-style advisory lock (`std::fs::File::lock`) on the
+/// canonical repository directory itself. No file is created or written;
+/// the kernel releases the lock when the process exits or crashes.
+///
+/// Every acquisition failure maps to the existing publication-safety
+/// category PERSISTENCE_FAILED (never an authority-read category).
+fn acquire_begin_coordination(repo: &Path) -> Result<BeginCoordinationGuard, Error> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        const WAIT_OBJECT_0: u32 = 0;
+        const WAIT_ABANDONED: u32 = 0x0000_0080;
+        const INFINITE: u32 = 0xFFFF_FFFF;
+
+        let mut hasher = Sha256::new();
+        // Windows paths are case-insensitive: fold the canonical identity so
+        // case-alias references to the same repository coordinate together.
+        let identity: Vec<u8> = repo
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        hasher.update(&identity);
+        let digest = format!("{:x}", hasher.finalize());
+        // OS-wide namespace: coordinates processes accessing the same
+        // repository from any session. No filesystem artifact.
+        let name_str = format!("Global\\MRGS-IMPL-BEGIN-{}", digest);
+        let name: Vec<u16> = std::ffi::OsStr::new(&name_str)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle =
+            unsafe { coordination_ffi::CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(Error::PersistenceFailed);
+        }
+        let wait = unsafe { coordination_ffi::WaitForSingleObject(handle, INFINITE) };
+        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+            unsafe {
+                coordination_ffi::CloseHandle(handle);
+            }
+            return Err(Error::PersistenceFailed);
+        }
+        Ok(BeginCoordinationGuard { handle })
+    }
+    #[cfg(unix)]
+    {
+        // Advisory lock on the repository root directory itself; no file is
+        // created and nothing is written (Git remains read-only).
+        let file = std::fs::File::open(repo).map_err(|_| Error::PersistenceFailed)?;
+        file.lock().map_err(|_| Error::PersistenceFailed)?;
+        Ok(BeginCoordinationGuard { _file: file })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for BeginCoordinationGuard {
+    fn drop(&mut self) {
+        unsafe {
+            coordination_ffi::ReleaseMutex(self.handle);
+            coordination_ffi::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for BeginCoordinationGuard {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
+}
+
 pub fn cmd_implementation_begin(
     repo_arg: &str,
     revision_token: &str,
@@ -1051,6 +1218,20 @@ pub fn cmd_implementation_begin(
 
     // Validate sparse config
     validate_sparse_config(&git)?;
+
+    // Phase 9 revision 2: debug-only pre-coordination barrier. All
+    // synchronized test callers signal here before any caller acquires the
+    // per-repository coordination guard (no-op unless the test env vars are
+    // supplied; compiled out of release builds).
+    test_only_begin_before_coordination()?;
+
+    // Phase 9 revision 2: per-repository coordination. Serialize concurrent
+    // first-publication callers so no caller performs the existence
+    // classification or begin-time cleanliness validation while another
+    // caller's in-flight publisher temporary exists. The RAII guard is held
+    // through first publication or the existing-record idempotent/conflict
+    // resolution and is released on every return path (including errors).
+    let _coordination = acquire_begin_coordination(&auth.repo)?;
 
     // Check existing implementation record
     let impl_path = match validate_impl_authority_file(&auth.gov_dir)? {

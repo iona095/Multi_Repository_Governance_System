@@ -701,6 +701,126 @@ pub fn cmd_audit_begin(repo_arg: &str, auditor_id: &str) -> Result<String, Error
 }
 
 // ============================================================================
+// Phase 9 revision 3: per-repository `audit record` coordination
+//
+// Concurrent `audit record` callers must not commit conflicting payloads
+// for the same pending round from the same stale ledger preimage. A kernel
+// coordination primitive serializes callers per canonical repository across
+// the whole ledger read/validate/transition/publish interval. The primitive
+// creates no durable filesystem artifact (no lock file, no coordination
+// file, nothing in the repository, `.git`, another repository, or an
+// external temporary directory) and is released automatically by the
+// operating system when a participating process exits or crashes, so no
+// stale permanent lock state can accumulate. Git remains read-only.
+// ============================================================================
+
+/// RAII guard held for the duration of the coordinated audit-record
+/// interval (ledger read through durable publication).
+struct AuditRecordCoordinationGuard {
+    #[cfg(windows)]
+    handle: *mut std::ffi::c_void,
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+#[cfg(windows)]
+mod audit_coordination_ffi {
+    extern "system" {
+        pub fn CreateMutexW(
+            lpMutexAttributes: *mut std::ffi::c_void,
+            bInitialOwner: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        pub fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
+        pub fn ReleaseMutex(hMutex: *mut std::ffi::c_void) -> i32;
+        pub fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+}
+
+/// Acquire the per-repository coordination for `audit record`.
+///
+/// Windows: OS-wide named mutex derived from the canonical repository path
+/// (case-folded so equivalent canonical references resolve to the same
+/// name). The kernel object leaves no filesystem artifact and is destroyed
+/// when the last handle closes; a crashed holder makes the mutex abandoned
+/// and the next waiter acquires it (WAIT_ABANDONED).
+///
+/// Unix: `flock(2)`-style advisory lock (`std::fs::File::lock`) on the
+/// canonical repository directory itself. No file is created or written;
+/// the kernel releases the lock when the process exits or crashes.
+///
+/// Every acquisition failure maps to the existing publication-safety
+/// category PERSISTENCE_FAILED (never an authority-read category).
+fn acquire_audit_record_coordination(repo: &Path) -> Result<AuditRecordCoordinationGuard, Error> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        const WAIT_OBJECT_0: u32 = 0;
+        const WAIT_ABANDONED: u32 = 0x0000_0080;
+        const INFINITE: u32 = 0xFFFF_FFFF;
+
+        let mut hasher = Sha256::new();
+        // Windows paths are case-insensitive: fold the canonical identity so
+        // case-alias references to the same repository coordinate together.
+        let identity: Vec<u8> = repo
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        hasher.update(&identity);
+        let digest = format!("{:x}", hasher.finalize());
+        // OS-wide namespace: coordinates processes accessing the same
+        // repository from any session. No filesystem artifact. The distinct
+        // name keeps this inert outside the audit-record mutation.
+        let name_str = format!("Global\\MRGS-AUDIT-RECORD-{}", digest);
+        let name: Vec<u16> = std::ffi::OsStr::new(&name_str)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle =
+            unsafe { audit_coordination_ffi::CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(Error::PersistenceFailed);
+        }
+        let wait = unsafe { audit_coordination_ffi::WaitForSingleObject(handle, INFINITE) };
+        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+            unsafe {
+                audit_coordination_ffi::CloseHandle(handle);
+            }
+            return Err(Error::PersistenceFailed);
+        }
+        Ok(AuditRecordCoordinationGuard { handle })
+    }
+    #[cfg(unix)]
+    {
+        // Advisory lock on the repository root directory itself; no file is
+        // created and nothing is written (Git remains read-only).
+        let file = std::fs::File::open(repo).map_err(|_| Error::PersistenceFailed)?;
+        file.lock().map_err(|_| Error::PersistenceFailed)?;
+        Ok(AuditRecordCoordinationGuard { _file: file })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AuditRecordCoordinationGuard {
+    fn drop(&mut self) {
+        unsafe {
+            audit_coordination_ffi::ReleaseMutex(self.handle);
+            audit_coordination_ffi::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AuditRecordCoordinationGuard {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
+}
+
+// ============================================================================
 // Section 18: `audit record`
 // ============================================================================
 
@@ -717,6 +837,14 @@ pub fn cmd_audit_record(repo_arg: &str, report_arg: &str) -> Result<String, Erro
         &std::fs::read(&impl_path).map_err(|_| Error::ImplementationAuthorityInvalid)?,
     )
     .map_err(|_| Error::ImplementationAuthorityInvalid)?;
+
+    // Phase 9 revision 3: acquire the per-repository coordination guard
+    // BEFORE the first ledger read. The guard is held through validation,
+    // replay/conflict/stale classification, ledger construction, and durable
+    // publication, so no conflicting writer can commit from the same stale
+    // preimage. It is released on every return path (including errors) and
+    // by the operating system if this process exits or crashes.
+    let _audit_record_coordination = acquire_audit_record_coordination(&auth.repo)?;
 
     // 3. Require existing final PENDING round
     let mut ledger = match read_audit_ledger(&auth.gov_dir)? {
@@ -775,6 +903,56 @@ pub fn cmd_audit_record(repo_arg: &str, report_arg: &str) -> Result<String, Erro
             } else {
                 // Different report after terminal
                 return Err(Error::AuditReportConflict);
+            }
+        }
+        return Err(Error::AuditNotPending);
+    }
+
+    // Phase 9 revision 3: idempotent replay of a FAIL record whose repair
+    // is already ROUTED. When a conflicting FAIL payload won the round, an
+    // exactly identical caller must return the exact REPAIR_ROUTED result
+    // the winner returned (byte-identical stdout, no write); a different
+    // report stays rejected with the existing stale category exactly as
+    // before. This is replay classification inside the coordinated
+    // interval, required for obligation 38's identical-winner-payload
+    // assertion.
+    if lifecycle == "REPAIR_ROUTED" {
+        let last_round = ledger.rounds.last().ok_or(Error::AuditNotPending)?;
+        if let (Some(_stored_path), Some(stored_sha), Some(stored_content)) = (
+            &last_round.report_source_path,
+            &last_round.report_sha256,
+            &last_round.report_content,
+        ) {
+            // Read and hash the new report
+            let report_path_check = Path::new(report_arg);
+            if !report_path_check.exists() {
+                return Err(Error::AuditNotPending);
+            }
+            let meta_check =
+                std::fs::symlink_metadata(report_path_check).map_err(|_| Error::AuditNotPending)?;
+            if !meta_check.file_type().is_file() {
+                return Err(Error::AuditNotPending);
+            }
+            let report_bytes_check =
+                std::fs::read(report_path_check).map_err(|_| Error::AuditNotPending)?;
+            let mut hasher_check = Sha256::new();
+            hasher_check.update(&report_bytes_check);
+            let report_sha256_check = format!("{:x}", hasher_check.finalize());
+
+            if report_sha256_check == stored_sha.as_str()
+                && report_bytes_check.to_vec() == stored_content.as_bytes()
+            {
+                let repair = last_round.repair.as_ref().ok_or(Error::AuditNotPending)?;
+                if repair.status == "ROUTED" {
+                    // Idempotent: same report, same repair route
+                    return Ok(format!(
+                        "REPAIR_ROUTED {} {} {} {}",
+                        last_round.audit_id,
+                        last_round.round,
+                        repair.attempt,
+                        repair.allowed_paths.len()
+                    ));
+                }
             }
         }
         return Err(Error::AuditNotPending);
