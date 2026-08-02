@@ -1,13 +1,19 @@
 # Multi-Repository Governance System
 
 Phase 1 — Accepted Plan Authority and Phase Selection
-Phase 2 — Active-Phase Contract Draft Registration
-Phase 3 — Contract Acceptance, Revision, and Lifecycle Transitions
+Phase 2 — Phase Selection and Contract Drafting
+Phase 3 — Contract Acceptance, Revision, and State Transitions
 Phase 4 — Contract-Bound Implementation Enforcement
 Phase 5 — Independent Audit and Bounded Repair Routing
-Phase 6 — Phase Closeout and Completion Ledger
+Phase 6 — Closeout, Final Manifests, and Completion Receipts
 Phase 7 — Model, Host, and Cross-Repository Continuity Metadata
 Phase 8 — State Recovery and Corruption Handling
+Phase 9 — Adversarial, Security, Resource, and Regression Validation
+Phase 10 — Activation, Rollback Drills, and Adoption Readiness
+
+Phase 9 validated the implementation against adversarial plans, contracts, metadata, and cross-repository confusion attacks (see `docs/contracts/phase-09-contract.md`).
+
+Phase 10 produces readiness evidence only: activation rehearsal, rollback drills, and deterministic readiness evidence, documented in the [Phase 10 adoption runbook](docs/phase-10-adoption-runbook.md). The runbook is a rehearsal procedure for isolated temporary pilots; it is not an installer, a deployment guide, or authorization to activate real repositories. Real activation, commit, push, release publication, and rollback execution each require separate human authorization. Readiness evidence is labelled `ACTIVATION_REHEARSAL`, never `PRODUCTION_ACTIVATED`.
 
 ## CLI
 
